@@ -13,3 +13,6 @@ Currently, the following scripts are available in this repository.
 
 2. **Update apps using PowerShell**
    This ready-to-use script, when deployed using the **Scripts and Remediation** module of Intune, helps update installed software automatically and silently.
+
+3. **Reparir System Integrity**
+   This script will repair any flaws in underlying windows systems. Built on **System File Checker (SFC)**, it scans the operating system for missing or corrupted system files and repairs them automatically.
