@@ -1,6 +1,6 @@
 <#
 Creation date: 03-Dec-2025
-Last modified date: 03-Dec-2025
+Last modified date: 12-Dec-2025
 Version: 0.1
 #>
 
@@ -25,3 +25,5 @@ $payload = [pscustomobject]@{ thresholdHours=$ThresholdHours; uptimeHours=$uptim
 
 $payload | ConvertTo-Json -Compress
 if ($payload.overThreshold) { exit 1 } else { exit 0 }
+
+# ------------------------------ END OF SCRIPT ------------------------------

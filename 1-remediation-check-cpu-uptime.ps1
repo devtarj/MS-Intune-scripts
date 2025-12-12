@@ -1,6 +1,6 @@
 <#
 Creation date: 04-Dec-2025
-Last modified date: 04-Dec-2025
+Last modified date: 12-Dec-2025
 Version: 0.1
 #>
 
@@ -18,4 +18,4 @@ shutdown /r /t 0
 # Uncomment the below line for force restart
 #Restart-Computer -Force
 
-# End of Script
+# ------------------------------ END OF SCRIPT ------------------------------
