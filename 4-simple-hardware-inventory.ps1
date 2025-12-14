@@ -115,9 +115,9 @@ $inventory = [PSCustomObject]@{
     InstalledApps = $apps
 }
 
-# ---------------------------
+# --------------------------
 # Output as JSON (single object)
-# ---------------------------
+# --------------------------
 $inventory | ConvertTo-Json -Depth 5
 
 
