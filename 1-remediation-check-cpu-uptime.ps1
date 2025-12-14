@@ -16,6 +16,6 @@ It is recommended to restart the device using Intune > Device > open device > Re
 shutdown /r /t 0
 
 # Uncomment the below line for force restart
-#Restart-Computer -Force
+Restart-Computer -Force
 
 # ------------------------------ END OF SCRIPT ------------------------------
