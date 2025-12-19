@@ -1,7 +1,7 @@
 #!/bin/bash#!/bin/bash
 # Created by: Tarj Mehta
 # First created on: 17-December-2025
-# Last update on: 18-December-2025
+# Last update on: 19-December-2025
 
 #---------- UPDATE PHP ----------
 
