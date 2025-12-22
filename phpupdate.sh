@@ -1,7 +1,7 @@
 #!/bin/bash#!/bin/bash
 # Created by: Tarj Mehta
 # First created on: 17-December-2025
-# Last update on: 19-December-2025
+# Last update on: 22-December-2025
 
 #---------- UPDATE PHP ----------
 
@@ -72,7 +72,6 @@ sleep 5 # pause 5 seconds
 sudo systemctl status apache2
 
 sleep 5 # 5 seconds pause
-
 
 echo "End of Script"
 
