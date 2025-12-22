@@ -32,59 +32,11 @@ sudo add-apt-repository -y ppa:ondrej/php
 sudo apt update
 sleep 5 # pause 5 seconds
 
+# Attempting to install PHP 8.5 and required extensions
 echo "Installing PHP 8.5"
 sudo apt install -y php8.5 libapache2-mod-php8.5
 
-sudo apt install -y php8.5-{bcmath,
-calendar,
-Core,
-ctype,
-curl,
-date,
-dom,
-exif,
-FFI,
-fileinfo,
-filter,
-ftp,
-gd,
-gettext,
-hash,
-iconv,
-json,
-libxml,
-mbstring,
-mysqli,
-mysqlnd,
-openssl,
-pcntl,
-pcre,
-PDO,
-pdo_mysql,
-Phar,
-posix,
-random,
-readline,
-Reflection,
-session,
-shmop,
-SimpleXML,
-sockets,
-sodium,
-SPL,
-standard,
-sysvmsg,
-sysvsem,
-sysvshm,
-tokenizer,
-xml,
-xmlreader,
-xmlwriter,
-xsl,
-Zend OPcache,
-zip,
-zlib
-}
+sudo apt install -y php8.5-{bcmath,calendar,Core,ctype,curl,date,dom,exif,FFI,fileinfo,filter,ftp,gd,gettext,hash,iconv,json,libxml,mbstring,mysqli,mysqlnd,openssl,pcntl,pcre,PDO,pdo_mysql,Phar,posix,random,readline,Reflection,session,shmop,SimpleXML,sockets,sodium,SPL,standard,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,Zend OPcache,zip,zlib}
 sleep 5 # pause 5 seconds
 
 echo "Disabling previously installed PHP version"
@@ -112,6 +64,7 @@ if [ $? -ne 0 ]; then
 echo "Apache faced an error in restart."
 exit 1
 fi
+
 echo "Apache2 started successfully after restart"
 sleep 5 # pause 5 seconds
 
