@@ -71,7 +71,13 @@ sleep 5 # pause 5 seconds
 # Printing the status of apache2 for confirmation
 sudo systemctl status apache2
 
+sudo a2dismod phpx.x
+sudo a2enmod phpx.x
+
 sleep 5 # 5 seconds pause
+
+# Suggested to restart the instance/server after update
+# sudo reboot
 
 echo "End of Script"
 
