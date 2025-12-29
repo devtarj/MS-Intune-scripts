@@ -71,8 +71,8 @@ sleep 5 # pause 5 seconds
 # Printing the status of apache2 for confirmation
 sudo systemctl status apache2
 
-sudo a2dismod phpx.x
-sudo a2enmod phpx.x
+sudo a2dismod phpx.x # replace x.x with previous PHP version number
+sudo a2enmod phpx.x # replace x.x with previous PHP version number
 
 sleep 5 # 5 seconds pause
 
