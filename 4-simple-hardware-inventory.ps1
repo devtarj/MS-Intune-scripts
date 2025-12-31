@@ -33,6 +33,7 @@ function Invoke-Safe {
 # ---------------------------
 # Basic System Information
 # ---------------------------
+
 $compSys = Get-CimInstance -ClassName CIM_ComputerSystem
 $bios    = Get-CimInstance -ClassName Win32_BIOS
 $os      = Get-CimInstance -ClassName Win32_OperatingSystem
