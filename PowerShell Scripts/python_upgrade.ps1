@@ -1,3 +1,5 @@
+# Check how the script will be signed, if you want to keep it unsigned, you can set the "Enforce script signature check" to "NO" under scripts and remediation module of Intune.
+
 # Ensure winget is available
 Get-Command winget -ErrorAction SilentlyContinue
 
