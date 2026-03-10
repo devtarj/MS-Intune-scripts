@@ -282,4 +282,4 @@ if [[ -f /var/run/reboot-required ]]; then
   reboot
 fi
 
-echo "==========SCRIPT ENDED=========="
+echo "=================================SCRIPT ENDED=================================="
