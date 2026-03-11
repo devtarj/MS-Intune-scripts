@@ -31,3 +31,9 @@ Currently, the following scripts are available in this repository.
 5. **Update Python in Windows** 🚀
 
    This script will update the installed python to the latest available version. Python will be added to PATH.
+
+
+# WIN32 APP FILES
+
+1. WinRAR
+2. Git
