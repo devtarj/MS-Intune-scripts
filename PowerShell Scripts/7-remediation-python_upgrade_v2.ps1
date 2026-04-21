@@ -1,27 +1,32 @@
-$log = "C:\temp\python_remediation.txt"
-
-Add-Content $log "Starting remediation at $(Get-Date)"
-
+# Ensure winget is available
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Add-Content $log "winget not found"
     exit 1
 }
 
-winget upgrade --id Python.Python.3 `
-    --accept-package-agreements `
-    --accept-source-agreements `
-    --silent
+# Run completely hidden
+$process = Start-Process "winget" -ArgumentList @(
+    "upgrade",
+    "--id", "Python.Python.3",
+    "--scope", "machine",
+    "--silent",
+    "--accept-package-agreements",
+    "--accept-source-agreements",
+    "--disable-interactivity"
+) -WindowStyle Hidden -Wait -PassThru
 
-Add-Content $log "Upgrade exit code: $LASTEXITCODE"
-
-if ($LASTEXITCODE -ne 0) {
-    winget install --id Python.Python.3 `
-        --accept-package-agreements `
-        --accept-source-agreements `
-        --silent
-
-    Add-Content $log "Install exit code: $LASTEXITCODE"
+# If upgrade failed, attempt install
+if ($process.ExitCode -ne 0) {
+    Start-Process "winget" -ArgumentList @(
+        "install",
+        "--id", "Python.Python.3",
+        "--scope", "machine",
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity"
+    ) -WindowStyle Hidden -Wait
 }
 
-Add-Content $log "Remediation finished"
-exit 0
+# Wait for two minutes to ensure the installation is complete before updating Defender signatures
+Start-Sleep -Seconds 120
+Start-Process "C:\Program Files\Windows Defender\MpCmdRun.exe" -ArgumentList "-SignatureUpdate"
