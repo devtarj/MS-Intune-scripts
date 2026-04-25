@@ -1,4 +1,4 @@
-# Ensure winget is available
+# Ensure winget is available on the target device, if not, exit with code 1 to trigger retry in Intune
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
     exit 1
 }
