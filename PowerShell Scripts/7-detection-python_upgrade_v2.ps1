@@ -1,39 +1,22 @@
-# Detect Python installations via registry (both 32-bit & 64-bit)
-$paths = @(
-    "HKLM:\SOFTWARE\Python\PythonCore",
-    "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore"
-)
+# Count Python executables in PATH
+$pythons = where.exe python 2>$null
 
-$versions = @()
-
-foreach ($path in $paths) {
-    if (Test-Path $path) {
-        $versions += (Get-ChildItem $path | Select-Object -ExpandProperty PSChildName)
-    }
-}
-
-# Remove duplicates
-$versions = $versions | Sort-Object -Unique
-
-if (-not $versions -or $versions.Count -eq 0) {
+if (-not $pythons) {
     Write-Output "Python not installed"
     exit 1
 }
 
-# If multiple versions → non-compliant
-if ($versions.Count -gt 1) {
-    Write-Output "Multiple Python versions detected: $($versions -join ', ')"
+# If multiple python paths → likely multiple installs
+if ($pythons.Count -gt 1) {
+    Write-Output "Multiple Python paths detected"
     exit 1
 }
 
-# Get installed version
-$installedVersion = $versions[0]
+# Check version
+$version = (python --version 2>&1)
 
-# Basic sanity check: ensure it's Python 3.x and reasonably recent
-if ($installedVersion -match "^3\.(1[3-9]|[2-9][0-9])") {
-    Write-Output "Python version OK: $installedVersion"
+if ($version -match "3\.(1[3-9]|[2-9][0-9])") {
     exit 0
 } else {
-    Write-Output "Outdated Python version: $installedVersion"
     exit 1
 }

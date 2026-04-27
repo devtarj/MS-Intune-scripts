@@ -1,71 +1,19 @@
-# Ensure winget is available on the target device, if not, exit with code 1 to trigger retry in Intune
-if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    exit 1
-}
-
-# Install or upgrade to latest Python 3 silently
-$process = Start-Process "winget" -ArgumentList @(
-    "upgrade",
-    "--id", "Python.Python.3",
-    "--scope", "machine",
-    "--silent",
-    "--accept-package-agreements",
-    "--accept-source-agreements",
-    "--disable-interactivity"
-) -WindowStyle Hidden -Wait -PassThru
-
-# If upgrade fails (not installed), install fresh
-if ($process.ExitCode -ne 0) {
-    Start-Process "winget" -ArgumentList @(
-        "install",
-        "--id", "Python.Python.3",
-        "--scope", "machine",
-        "--silent",
-        "--accept-package-agreements",
-        "--accept-source-agreements",
-        "--disable-interactivity"
-    ) -WindowStyle Hidden -Wait
-}
-
-# Give system time to register install
-Start-Sleep -Seconds 10
-
-# Remove old Python versions via registry detection
-$paths = @(
-    "HKLM:\SOFTWARE\Python\PythonCore",
-    "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore"
+# Remove Python via Win32 uninstall registry (covers EXE/MSI installs)
+$uninstallPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
 )
 
-$versions = @()
-
-foreach ($path in $paths) {
-    if (Test-Path $path) {
-        $versions += (Get-ChildItem $path | Select-Object -ExpandProperty PSChildName)
-    }
+$apps = Get-ItemProperty $uninstallPaths | Where-Object {
+    $_.DisplayName -like "Python*"
 }
 
-$versions = $versions | Sort-Object -Unique
+foreach ($app in $apps) {
+    if ($app.DisplayVersion -notmatch "^3\.(1[3-9]|[2-9][0-9])") {
+        Write-Output "Uninstalling $($app.DisplayName)"
 
-# Keep only latest version
-if ($versions.Count -gt 1) {
-    $latest = ($versions | Sort-Object {[version]$_} -Descending)[0]
-
-    foreach ($ver in $versions) {
-        if ($ver -ne $latest) {
-            Write-Output "Removing old Python version: $ver"
-
-            Start-Process "winget" -ArgumentList @(
-                "uninstall",
-                "--id", "Python.Python.$ver",
-                "--silent",
-                "--accept-package-agreements",
-                "--accept-source-agreements"
-            ) -WindowStyle Hidden -Wait
+        if ($app.UninstallString) {
+            Start-Process "cmd.exe" -ArgumentList "/c $($app.UninstallString) /quiet" -Wait -WindowStyle Hidden
         }
     }
 }
-
-# Optional: Trigger Defender refresh (helps close findings faster)
-Start-Process "C:\Program Files\Windows Defender\MpCmdRun.exe" `
-    -ArgumentList "-Scan -ScanType 1" `
-    -WindowStyle Hidden
