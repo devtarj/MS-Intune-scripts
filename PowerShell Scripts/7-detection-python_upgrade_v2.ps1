@@ -1,4 +1,4 @@
-# Check if python is available in PATH
+# Check if python is available
 $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
 
 if (-not $pythonCmd) {
@@ -16,13 +16,13 @@ if ($versionOutput -match "(\d+\.\d+\.\d+)") {
     exit 1
 }
 
-# Define minimum acceptable version (adjust if needed)
-$minimumVersion = [version]"3.13.0"
+# Enforce minimum version = 3.14.4
+$minimumVersion = [version]"3.14.4"
 
 if ($installedVersion -lt $minimumVersion) {
-    Write-Output "Outdated Python version detected: $installedVersion"
+    Write-Output "Outdated Python version: $installedVersion"
     exit 1
 }
 
-Write-Output "Python is compliant: $installedVersion"
+Write-Output "Python compliant: $installedVersion"
 exit 0

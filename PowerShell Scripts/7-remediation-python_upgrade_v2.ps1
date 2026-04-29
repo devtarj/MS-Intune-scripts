@@ -17,7 +17,7 @@ $process = Start-Process "winget" -ArgumentList @(
     "--force"
 ) -WindowStyle Hidden -Wait -PassThru
 
-# If not installed, install it
+# If upgrade fails (not installed), install
 if ($process.ExitCode -ne 0) {
     Start-Process "winget" -ArgumentList @(
         "install",
@@ -33,8 +33,10 @@ if ($process.ExitCode -ne 0) {
 Start-Sleep -Seconds 10
 
 # -------------------------------
-# 2. Remove old Python versions (EXE/MSI installs)
+# 2. Remove old Python versions (EXE/MSI)
 # -------------------------------
+$minimumVersion = [version]"3.14.4"
+
 $uninstallPaths = @(
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
     "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
@@ -45,17 +47,25 @@ $apps = Get-ItemProperty $uninstallPaths | Where-Object {
 }
 
 foreach ($app in $apps) {
-    if ($app.DisplayVersion -and $app.DisplayVersion -notmatch "^3\.(1[3-9]|[2-9][0-9])") {
-        Write-Output "Removing old version: $($app.DisplayName)"
+    if ($app.DisplayVersion) {
+        try {
+            $appVersion = [version]$app.DisplayVersion
 
-        if ($app.UninstallString) {
-            Start-Process "cmd.exe" -ArgumentList "/c $($app.UninstallString) /quiet" -Wait -WindowStyle Hidden
-        }
+            if ($appVersion -lt $minimumVersion) {
+                Write-Output "Removing old version: $($app.DisplayName) ($appVersion)"
+
+                if ($app.UninstallString) {
+                    Start-Process "cmd.exe" `
+                        -ArgumentList "/c $($app.UninstallString) /quiet" `
+                        -WindowStyle Hidden -Wait
+                }
+            }
+        } catch {}
     }
 }
 
 # -------------------------------
-# 3. Remove old versions via winget (if present)
+# 3. Remove old versions via winget
 # -------------------------------
 $wingetList = winget list --source winget | Select-String "Python"
 
@@ -63,25 +73,29 @@ foreach ($line in $wingetList) {
     if ($line -match "Python\.Python\.(\d+\.\d+)") {
         $ver = $matches[1]
 
-        if ($ver -notmatch "^3\.(1[3-9]|[2-9][0-9])") {
-            Start-Process "winget" -ArgumentList @(
-                "uninstall",
-                "--id", "Python.Python.$ver",
-                "--silent",
-                "--accept-package-agreements",
-                "--accept-source-agreements"
-            ) -WindowStyle Hidden -Wait
-        }
+        try {
+            $verObj = [version]("$ver.0")
+
+            if ($verObj -lt $minimumVersion) {
+                Start-Process "winget" -ArgumentList @(
+                    "uninstall",
+                    "--id", "Python.Python.$ver",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements"
+                ) -WindowStyle Hidden -Wait
+            }
+        } catch {}
     }
 }
 
 # -------------------------------
-# 4. Clean PATH (remove old Python references)
+# 4. Clean PATH (remove old Python entries)
 # -------------------------------
 $envPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 
 $newPath = ($envPath -split ";" | Where-Object {
-    $_ -notmatch "Python3\.1[0-2]"
+    $_ -notmatch "Python3\.(1[0-3]|14\.0|14\.1|14\.2|14\.3)"
 }) -join ";"
 
 [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
