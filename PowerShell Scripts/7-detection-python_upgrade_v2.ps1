@@ -1,28 +1,33 @@
-# Check if python is available
-$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+# Find all python.exe locations
+$pythonPaths = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)" -Recurse -Filter python.exe -ErrorAction SilentlyContinue
 
-if (-not $pythonCmd) {
-    Write-Output "Python not installed"
+if (-not $pythonPaths) {
+    Write-Output "No Python found"
     exit 1
 }
 
-# Get active Python version
-$versionOutput = python --version 2>&1
-
-if ($versionOutput -match "(\d+\.\d+\.\d+)") {
-    $installedVersion = [version]$matches[1]
-} else {
-    Write-Output "Unable to determine Python version"
-    exit 1
-}
-
-# Enforce minimum version = 3.14.4
 $minimumVersion = [version]"3.14.4"
+$compliant = $false
 
-if ($installedVersion -lt $minimumVersion) {
-    Write-Output "Outdated Python version: $installedVersion"
-    exit 1
+foreach ($path in $pythonPaths) {
+    try {
+        $versionOutput = & $path.FullName --version 2>&1
+        if ($versionOutput -match "(\d+\.\d+\.\d+)") {
+            $ver = [version]$matches[1]
+
+            if ($ver -ge $minimumVersion) {
+                $compliant = $true
+            } else {
+                Write-Output "Old Python found: $ver at $($path.FullName)"
+                exit 1
+            }
+        }
+    } catch {}
 }
 
-Write-Output "Python compliant: $installedVersion"
-exit 0
+if ($compliant) {
+    Write-Output "Python compliant"
+    exit 0
+}
+
+exit 1
