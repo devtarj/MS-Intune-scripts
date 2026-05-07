@@ -1,17 +1,29 @@
 $ErrorActionPreference = "SilentlyContinue"
 
 $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-if (-not $winget) { exit 0 }
 
-$upgrades = winget upgrade --accept-source-agreements | Out-String
-
-# Filter lines with actual packages (ignore headers)
-$lines = $upgrades -split "`n" | Where-Object { $_ -match "^\S" }
-
-# If no upgrades → compliant
-if ($lines.Count -eq 0) {
+if (-not $winget) {
     exit 0
 }
 
-# If upgrades exist → trigger remediation
-exit 1
+try {
+
+    $upgradeData = winget upgrade `
+        --output json `
+        --accept-source-agreements |
+        ConvertFrom-Json
+
+    if ($upgradeData.Sources.Packages.Count -gt 0) {
+        Write-Output "Updates available"
+        exit 1
+    }
+    else {
+        Write-Output "Compliant"
+        exit 0
+    }
+
+}
+catch {
+
+    exit 0
+}
