@@ -1,3 +1,5 @@
+# Created by: Tarj Mehta
+# Created on: 12-May-2026
 # Try to find PHP via PATH
 $phpCmd = Get-Command php -ErrorAction SilentlyContinue
 
