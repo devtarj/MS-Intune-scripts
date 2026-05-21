@@ -1,12 +1,11 @@
 # ============================================
-# .NET Runtime Detection Script
-# Enterprise Grade - Intune Remediation
+# Reliable .NET Detection Script
+# Intune Enterprise Version
 # ============================================
 
 $LogPath = "C:\ProgramData\Company\Logs"
 $LogFile = "$LogPath\DotNet-Detection.log"
 
-# Create log folder
 if (!(Test-Path $LogPath)) {
     New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
 }
@@ -18,50 +17,51 @@ function Write-Log {
     Add-Content -Path $LogFile -Value "$Time - $Message"
 }
 
-Write-Log "Starting .NET detection..."
+Write-Log "Starting detection..."
 
-# Ensure winget exists
-$Winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+# Check if dotnet exists
+$DotNet = Get-Command dotnet.exe -ErrorAction SilentlyContinue
 
-if (!$Winget) {
-    Write-Log "Winget not found."
+if (!$DotNet) {
+    Write-Log ".NET not installed"
     exit 1
 }
 
-# IDs to check
-$DotNetPackages = @(
-    "Microsoft.DotNet.Runtime.6",
-    "Microsoft.DotNet.Runtime.8",
-    "Microsoft.DotNet.AspNetCore.8",
-    "Microsoft.DotNet.DesktopRuntime.8"
+# Get installed runtimes
+$Runtimes = dotnet --list-runtimes 2>&1
+
+Write-Log "Installed runtimes:"
+Write-Log $Runtimes
+
+# Required major versions
+$RequiredVersions = @(
+    "Microsoft.NETCore.App 8",
+    "Microsoft.AspNetCore.App 8",
+    "Microsoft.WindowsDesktop.App 8"
 )
 
-$UpdatesNeeded = $false
+$Missing = $false
 
-foreach ($Package in $DotNetPackages) {
+foreach ($Version in $RequiredVersions) {
 
-    Write-Log "Checking package: $Package"
+    if ($Runtimes -match [regex]::Escape($Version)) {
 
-    $Result = winget upgrade --id $Package --accept-source-agreements 2>&1
-
-    if ($Result -match "available") {
-
-        Write-Log "Update available for $Package"
-        $UpdatesNeeded = $true
+        Write-Log "$Version FOUND"
     }
     else {
 
-        Write-Log "No updates for $Package"
+        Write-Log "$Version MISSING"
+        $Missing = $true
     }
 }
 
-if ($UpdatesNeeded) {
+if ($Missing) {
 
-    Write-Log "Device NON-COMPLIANT"
+    Write-Log "NON-COMPLIANT"
     exit 1
 }
 else {
 
-    Write-Log "Device COMPLIANT"
+    Write-Log "COMPLIANT"
     exit 0
 }

@@ -3,6 +3,9 @@
 # Enterprise Grade - Silent Updater
 # ============================================
 
+winget source reset --force
+winget source update
+
 $LogPath = "C:\ProgramData\Company\Logs"
 $LogFile = "$LogPath\DotNet-Remediation.log"
 
