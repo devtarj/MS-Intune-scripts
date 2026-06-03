@@ -1,7 +1,7 @@
 # ============================================
 # Reliable .NET Detection Script
 # Intune Enterprise Version
-# last edit: 2026-06-01
+# last edit: 2026-06-03
 # ============================================
 
 $LogPath = "C:\ProgramData\Company\Logs"
