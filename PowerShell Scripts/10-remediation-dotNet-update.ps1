@@ -1,70 +1,80 @@
-# ============================================
-# .NET Runtime Remediation Script
-# Enterprise Grade - Silent Updater
-# ============================================
+# ====================================================
+# Update .NET Runtime Silently
+# Intune Proactive Remediation
+# Runs as SYSTEM
+# ====================================================
 
-winget source reset --force
-winget source update
+$LogFolder = "C:\ProgramData\Company\Logs"
+$LogFile = "$LogFolder\DotNetUpdate.log"
 
-$LogPath = "C:\ProgramData\Company\Logs"
-$LogFile = "$LogPath\DotNet-Remediation.log"
-
-# Create log folder
-if (!(Test-Path $LogPath)) {
-    New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+if (!(Test-Path $LogFolder)) {
+    New-Item -ItemType Directory -Path $LogFolder -Force | Out-Null
 }
 
 function Write-Log {
     param([string]$Message)
 
-    $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogFile -Value "$Time - $Message"
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    Add-Content -Path $LogFile -Value "$Timestamp - $Message"
 }
 
-Write-Log "Starting .NET remediation..."
+Write-Log "===== Starting .NET Update ====="
 
-# Ensure winget exists
-$Winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+# Locate Winget
+
+$Winget = Get-ChildItem `
+    "C:\Program Files\WindowsApps" `
+    -Recurse `
+    -Filter winget.exe `
+    -ErrorAction SilentlyContinue |
+    Select-Object -First 1
 
 if (!$Winget) {
-
-    Write-Log "Winget not found. Exiting."
-    exit 1
+    Write-Log "Winget not found"
+    Exit 1
 }
 
-# Packages to update
+$WingetPath = $Winget.FullName
+
+Write-Log "Winget found at $WingetPath"
+
+# Runtime IDs to update
+
 $DotNetPackages = @(
-    "Microsoft.DotNet.Runtime.6",
     "Microsoft.DotNet.Runtime.8",
     "Microsoft.DotNet.AspNetCore.8",
-    "Microsoft.DotNet.DesktopRuntime.8"
+    "Microsoft.DotNet.SDK.8"
 )
 
 foreach ($Package in $DotNetPackages) {
 
+    Write-Log "Processing $Package"
+
     try {
 
-        Write-Log "Updating $Package"
+        Start-Process `
+            -FilePath $WingetPath `
+            -ArgumentList @(
+                "upgrade",
+                "--id", $Package,
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements"
+            ) `
+            -Wait `
+            -NoNewWindow
 
-        winget upgrade `
-            --id $Package `
-            --silent `
-            --scope machine `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --disable-interactivity `
-            --force `
-            2>&1 | Out-File -Append $LogFile
-
-        Write-Log "$Package updated successfully"
+        Write-Log "$Package completed"
 
     }
     catch {
 
-        Write-Log "FAILED updating ${Package}: $_"
+        Write-Log "$Package failed : $_"
+
     }
 }
 
-Write-Log "Remediation completed."
+Write-Log "===== .NET Update Finished ====="
 
-exit 0
+Exit 0

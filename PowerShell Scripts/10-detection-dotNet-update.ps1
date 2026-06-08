@@ -1,68 +1,21 @@
-# ============================================
-# Reliable .NET Detection Script
-# Intune Enterprise Version
-# last edit: 2026-06-05
-# ============================================
+# Detect if .NET update is required
 
-$LogPath = "C:\ProgramData\Company\Logs"
-$LogFile = "$LogPath\DotNet-Detection.log"
+$winget = Get-Command winget.exe -ErrorAction SilentlyContinue
 
-if (!(Test-Path $LogPath)) {
-    New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+if (-not $winget) {
+    Write-Output ".NET update required - Winget not found"
+    Exit 1
 }
 
-function Write-Log {
-    param([string]$Message)
+try {
+    $updates = winget upgrade --id Microsoft.DotNet.Runtime.8 --silent --accept-source-agreements 2>$null
 
-    $Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogFile -Value "$Time - $Message"
-}
-
-Write-Log "Starting detection..."
-
-# Check if dotnet exists
-$DotNet = Get-Command dotnet.exe -ErrorAction SilentlyContinue
-
-if (!$DotNet) {
-    Write-Log ".NET not installed"
-    exit 1
-}
-
-# Get installed runtimes
-$Runtimes = dotnet --list-runtimes 2>&1
-
-Write-Log "Installed runtimes:"
-Write-Log $Runtimes
-
-# Required major versions
-$RequiredVersions = @(
-    "Microsoft.NETCore.App 8",
-    "Microsoft.AspNetCore.App 8",
-    "Microsoft.WindowsDesktop.App 8"
-)
-
-$Missing = $false
-
-foreach ($Version in $RequiredVersions) {
-
-    if ($Runtimes -match [regex]::Escape($Version)) {
-
-        Write-Log "$Version FOUND"
+    if ($updates -match "No available upgrade found") {
+        Exit 0
     }
-    else {
 
-        Write-Log "$Version MISSING"
-        $Missing = $true
-    }
+    Exit 1
 }
-
-if ($Missing) {
-
-    Write-Log "NON-COMPLIANT"
-    exit 1
-}
-else {
-
-    Write-Log "COMPLIANT"
-    exit 0
+catch {
+    Exit 1
 }
