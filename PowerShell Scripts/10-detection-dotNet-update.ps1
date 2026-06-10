@@ -1,5 +1,5 @@
 # Detect if .NET update is required
-# Date: 2024-06-08
+# Date: 2024-06-10
 
 $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
 
