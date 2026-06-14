@@ -1,13 +1,14 @@
-$LogFolder = "C:\ProgramData\Company\Logs"
-
-if(Test-Path $LogFolder)
-{
-    Get-ChildItem $LogFolder -Recurse
-
-    Get-Content "$LogFolder\DotNetUpdate.log" -ErrorAction SilentlyContinue
-}
-Get-Command winget.exe
-
+Write-Output "===== WHOAMI ====="
 whoami
 
+Write-Output "`n===== WINGET ====="
+Get-Command winget.exe -ErrorAction SilentlyContinue | Format-List *
+
+Write-Output "`n===== DOTNET ====="
+dotnet --list-runtimes
+
+Write-Output "`n===== SDKS ====="
+dotnet --list-sdks
+
+Write-Output "`n===== UPGRADES ====="
 winget upgrade
