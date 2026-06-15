@@ -1,3 +1,5 @@
+#last updated: 2026-06-15
+
 Write-Output "===== WHOAMI ====="
 whoami
 
