@@ -1,16 +1,22 @@
-#last updated: 2026-06-15
+$Log = "C:\ProgramData\DotNetDiagnostic.txt"
 
-Write-Output "===== WHOAMI ====="
-whoami
+$Results = @()
 
-Write-Output "`n===== WINGET ====="
-Get-Command winget.exe -ErrorAction SilentlyContinue | Format-List *
+$Results += "===== WHOAMI ====="
+$Results += (whoami)
 
-Write-Output "`n===== DOTNET ====="
-dotnet --list-runtimes
+$Results += ""
+$Results += "===== DOTNET RUNTIMES ====="
+$Results += (dotnet --list-runtimes 2>&1)
 
-Write-Output "`n===== SDKS ====="
-dotnet --list-sdks
+$Results += ""
+$Results += "===== DOTNET SDKS ====="
+$Results += (dotnet --list-sdks 2>&1)
 
-Write-Output "`n===== UPGRADES ====="
-winget upgrade
+$Results += ""
+$Results += "===== WINGET UPGRADES ====="
+$Results += (winget upgrade 2>&1)
+
+$Results | Out-File $Log -Force
+
+$Results
