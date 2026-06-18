@@ -1,8 +1,2 @@
-if (Test-Path "C:\ProgramData\Company\Logs\DotNetUpdate.log")
-{
-    Write-Output "LOG_EXISTS"
-}
-else
-{
-    Write-Output "LOG_MISSING"
-}
+$log = Get-Content "C:\ProgramData\Company\Logs\DotNetUpdate.log" -Tail 50
+$log
