@@ -1,10 +1,7 @@
-$packages = @(
-    "Microsoft.DotNet.Runtime.8",
-    "Microsoft.DotNet.AspNetCore.8",
-    "Microsoft.DotNet.SDK.8"
-)
-
-foreach ($pkg in $packages) {
-    Write-Output "===== $pkg ====="
-    winget list --id $pkg
-}
+Get-ItemProperty `
+HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\* ,
+HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+Where-Object {
+    $_.DisplayName -like "*Microsoft .NET*"
+} |
+Select-Object DisplayName, DisplayVersion
