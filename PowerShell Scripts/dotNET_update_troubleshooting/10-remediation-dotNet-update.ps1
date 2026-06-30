@@ -2,7 +2,6 @@
 # Update .NET Runtime/ASP.NET Core/SDK Silently
 # Intune Proactive Remediation - Remediation
 # Runs as SYSTEM
-# Date: 2026-06-30
 # ====================================================
 
 $LogFolder = "C:\ProgramData\Company\Logs"
@@ -18,16 +17,40 @@ function Write-Log {
     Add-Content -Path $LogFile -Value "$Timestamp [REMEDIATE] - $Message"
 }
 
-# Same resolution logic as the detection script - keeping these identical
-# is what stops detection and remediation from disagreeing with each other.
 function Get-WingetPath {
-    $candidate = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" `
-        -Filter "winget.exe" -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Directory.Name -like "Microsoft.DesktopAppInstaller_*" } |
-        Sort-Object { [version]($_.Directory.Name -replace '.*_(\d+\.\d+\.\d+\.\d+)_.*','$1') } -Descending |
-        Select-Object -First 1
+    # ---------------------------------------------------------------
+    # Get-ChildItem on C:\Program Files\WindowsApps silently returns
+    # nothing under the SYSTEM account due to Windows ACLs, even
+    # though SYSTEM can execute files inside it.
+    # cmd /c dir /b /s bypasses that PS-level restriction.
+    # ---------------------------------------------------------------
 
-    if ($candidate) { return $candidate.FullName }
+    # Method 1: cmd dir (most reliable under SYSTEM)
+    $cmdResult = cmd /c 'dir /b /s "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" 2>nul'
+    if ($cmdResult) {
+        $paths = ($cmdResult -split "`r?`n") | Where-Object { $_.Trim() -match "winget\.exe$" }
+        if ($paths) {
+            $found = ($paths | Select-Object -Last 1).Trim()
+            Write-Log "Winget found via cmd dir: $found"
+            return $found
+        }
+    }
+
+    # Method 2: Get-AppxPackage fallback
+    try {
+        $pkg = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -AllUsers -ErrorAction Stop |
+               Sort-Object Version -Descending | Select-Object -First 1
+        if ($pkg) {
+            $p = Join-Path $pkg.InstallLocation "winget.exe"
+            if (Test-Path $p) {
+                Write-Log "Winget found via AppxPackage: $p"
+                return $p
+            }
+        }
+    } catch {
+        Write-Log "AppxPackage lookup failed: $_"
+    }
+
     return $null
 }
 
@@ -55,6 +78,10 @@ foreach ($Package in $DotNetPackages) {
 
     Write-Log "Processing $Package"
 
+    # Clear per-package log files so previous runs don't confuse diagnostics
+    $stdoutLog = "$LogFolder\${Package}_stdout.log"
+    $stderrLog = "$LogFolder\${Package}_stderr.log"
+
     try {
         $proc = Start-Process `
             -FilePath $WingetPath `
@@ -62,31 +89,39 @@ foreach ($Package in $DotNetPackages) {
                 "upgrade",
                 "--id", $Package,
                 "--exact",
+                "--source", "winget",
                 "--silent",
                 "--accept-package-agreements",
                 "--accept-source-agreements",
                 "--disable-interactivity"
             ) `
             -Wait -NoNewWindow -PassThru `
-            -RedirectStandardOutput "$LogFolder\${Package}_stdout.log" `
-            -RedirectStandardError  "$LogFolder\${Package}_stderr.log"
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError  $stderrLog
 
-        # winget's "no applicable update" exit code is harmless;
-        # only treat genuine non-zero errors as a real failure.
+        # Log stdout/stderr output for diagnostics
+        if (Test-Path $stdoutLog) {
+            $out = Get-Content $stdoutLog -Raw -ErrorAction SilentlyContinue
+            if ($out) { Write-Log "$Package stdout: $($out.Trim())" }
+        }
+
+        # winget exit codes:
+        #   0            = success
+        #   -1978335189  = 0x8A150109 - no applicable update found (not a failure)
+        #   -1978335150  = 0x8A150132 - no installed package found (not a failure)
+        $noUpdateCodes = @(-1978335189, -1978335150)
+
         if ($proc.ExitCode -eq 0) {
-            Write-Log "$Package completed successfully"
-        }
-        elseif ($proc.ExitCode -eq -1978335189) {
-            # No applicable update found - nothing to do, not a failure
-            Write-Log "$Package already up to date"
-        }
-        else {
-            Write-Log "$Package failed with exit code $($proc.ExitCode)"
+            Write-Log "$Package updated successfully"
+        } elseif ($proc.ExitCode -in $noUpdateCodes) {
+            Write-Log "$Package already up to date or not installed (exit $($proc.ExitCode))"
+        } else {
+            Write-Log "$Package FAILED with exit code $($proc.ExitCode)"
             $AnyFailure = $true
         }
-    }
-    catch {
-        Write-Log "$Package failed : $_"
+
+    } catch {
+        Write-Log "$Package threw an exception: $_"
         $AnyFailure = $true
     }
 }
@@ -94,8 +129,6 @@ foreach ($Package in $DotNetPackages) {
 Write-Log "===== .NET Update Finished - AnyFailure=$AnyFailure ====="
 
 if ($AnyFailure) {
-    # Report failure honestly so Intune reflects the real remediation state
-    # instead of silently masking errors with Exit 0.
     Exit 1
 }
 
