@@ -2,6 +2,7 @@
 # Update .NET Runtime/ASP.NET Core/SDK Silently
 # Intune Proactive Remediation - Remediation
 # Runs as SYSTEM
+# Date: 2026-07-02
 # ====================================================
 
 $LogFolder = "C:\ProgramData\Company\Logs"
