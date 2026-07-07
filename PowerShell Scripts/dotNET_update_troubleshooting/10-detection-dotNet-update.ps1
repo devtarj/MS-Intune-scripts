@@ -1,7 +1,14 @@
 # ====================================================
-# Detect if .NET Runtime/ASP.NET Core/SDK updates are required
-# Intune Proactive Remediation - Detection
-# Runs as SYSTEM
+# Update .NET Runtime / ASP.NET Core / SDK silently
+# Intune Proactive Remediation – Remediation Script
+# Runs as: SYSTEM
+# Exit 0 = Remediation succeeded  → Intune: "Remediated"
+# Exit 1 = Remediation failed     → Intune: "Failed"
+#
+# KEY FIX: Start-Process with -RedirectStandardOutput /
+# -RedirectStandardError throws terminating exceptions
+# under SYSTEM (no attached console). Replaced with
+# direct invocation using & which is stable under SYSTEM.
 # ====================================================
 
 $LogFolder = "C:\ProgramData\Company\Logs"
@@ -13,102 +20,110 @@ if (!(Test-Path $LogFolder)) {
 
 function Write-Log {
     param([string]$Message)
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogFile -Value "$Timestamp [DETECT] - $Message"
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogFile -Value "$ts [REMEDIATE] $Message"
 }
 
 function Get-WingetPath {
-    # ---------------------------------------------------------------
-    # Get-ChildItem on C:\Program Files\WindowsApps silently returns
-    # nothing under the SYSTEM account due to Windows ACLs, even
-    # though SYSTEM can execute files inside it.
-    # cmd /c dir /b /s bypasses that PS-level restriction.
-    # ---------------------------------------------------------------
-
-    # Method 1: cmd dir (most reliable under SYSTEM)
-    $cmdResult = cmd /c 'dir /b /s "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" 2>nul'
-    if ($cmdResult) {
-        $paths = ($cmdResult -split "`r?`n") | Where-Object { $_.Trim() -match "winget\.exe$" }
-        if ($paths) {
-            $found = ($paths | Select-Object -Last 1).Trim()
-            Write-Log "Winget found via cmd dir: $found"
-            return $found
-        }
+    # Method 1: cmd dir
+    $raw = cmd /c 'dir /b /s "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" 2>nul'
+    if ($raw) {
+        $hit = ($raw -split "`r?`n") |
+               Where-Object { $_.Trim() -match 'winget\.exe$' } |
+               Select-Object -Last 1
+        if ($hit) { return $hit.Trim() }
     }
 
-    # Method 2: Get-AppxPackage fallback
+    # Method 2: Get-AppxPackage (AllUsers)
     try {
         $pkg = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -AllUsers -ErrorAction Stop |
                Sort-Object Version -Descending | Select-Object -First 1
         if ($pkg) {
             $p = Join-Path $pkg.InstallLocation "winget.exe"
-            if (Test-Path $p) {
-                Write-Log "Winget found via AppxPackage: $p"
-                return $p
-            }
+            if (Test-Path $p) { return $p }
         }
-    } catch {
-        Write-Log "AppxPackage lookup failed: $_"
-    }
+    } catch { }
 
     return $null
 }
 
-Write-Log "===== Starting .NET Detection ====="
+Write-Log "===== Remediation started ====="
+
+# winget needs LOCALAPPDATA for its source cache and settings,
+# even when running as SYSTEM.
+if ([string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
+    $env:LOCALAPPDATA = "$env:SystemRoot\System32\config\systemprofile\AppData\Local"
+    Write-Log "Set LOCALAPPDATA to $env:LOCALAPPDATA"
+}
 
 $WingetPath = Get-WingetPath
 
 if (-not $WingetPath) {
-    Write-Log "Winget executable not found under SYSTEM context"
-    Write-Output "Non-Compliant: Winget not found"
+    Write-Log "ERROR: winget not found – cannot remediate"
     Exit 1
 }
 
-# Must match the package list in the remediation script exactly
-$DotNetPackages = @(
+Write-Log "Winget: $WingetPath"
+
+# Refresh the winget source before attempting any upgrades.
+# This ensures the source cache is valid under the SYSTEM profile.
+Write-Log "Refreshing winget sources..."
+try {
+    $srcOut = & $WingetPath source update --accept-source-agreements 2>&1 | Out-String
+    Write-Log "Source update: $($srcOut.Trim() -replace '\s+',' ')"
+} catch {
+    Write-Log "Source update warning (non-fatal): $_"
+}
+
+# Must stay in sync with the detection script's package list
+$Packages = @(
     "Microsoft.DotNet.Runtime.8",
     "Microsoft.DotNet.AspNetCore.8",
     "Microsoft.DotNet.SDK.8"
 )
 
-$UpdateNeeded = $false
+$AnyFailure = $false
 
-foreach ($Package in $DotNetPackages) {
+foreach ($pkg in $Packages) {
+    Write-Log "--- Processing $pkg"
+
     try {
-        $output = & $WingetPath upgrade `
-            --id $Package `
+        # Direct invocation with & avoids the Start-Process + redirection
+        # crash that occurs when SYSTEM has no console attached.
+        $raw = & $WingetPath upgrade `
+            --id $pkg `
             --exact `
-            --source winget `
+            --silent `
+            --accept-package-agreements `
             --accept-source-agreements `
-            --disable-interactivity 2>&1 | Out-String
+            --disable-interactivity 2>&1
 
-        $outputClean = $output.Trim() -replace '\s+', ' '
-        Write-Log "Check [$Package]: $outputClean"
+        # $LASTEXITCODE is reliable here; capture it immediately
+        $ec  = $LASTEXITCODE
+        $out = ($raw | Out-String).Trim()
 
-        # Winget's "nothing to update" phrasing across recent versions
-        if ($output -match "No applicable update found" -or
-            $output -match "No available upgrade found" -or
-            $output -match "No installed package found" -or
-            $output -match "already installed") {
-            Write-Log "$Package is up to date or not installed"
-            continue
+        Write-Log "[$pkg] exit=$ec output=$($out -replace '\s+',' ')"
+
+        if ($ec -eq 0) {
+            Write-Log "[$pkg] Updated successfully"
+        }
+        elseif ($out -match "No applicable update found|No available upgrade found|No installed package found|already installed") {
+            # winget may exit 0 or non-zero for "nothing to do" depending on version;
+            # checking output text is more reliable across versions.
+            Write-Log "[$pkg] Already up to date – skipping"
+        }
+        else {
+            Write-Log "[$pkg] FAILED (exit=$ec)"
+            $AnyFailure = $true
         }
 
-        Write-Log "$Package has an available update"
-        $UpdateNeeded = $true
-
     } catch {
-        Write-Log "Error checking $Package : $_"
-        $UpdateNeeded = $true
+        Write-Log "[$pkg] Exception: $_"
+        $AnyFailure = $true
     }
 }
 
-Write-Log "===== Detection Finished - UpdateNeeded=$UpdateNeeded ====="
+Write-Log "===== Remediation finished – AnyFailure=$AnyFailure ====="
 
-if ($UpdateNeeded) {
-    Write-Output "Non-Compliant: One or more .NET components require an update"
-    Exit 1
-} else {
-    Write-Output "Compliant: .NET components are up to date"
-    Exit 0
-}
+if ($AnyFailure) { Exit 1 }
+Exit 0
