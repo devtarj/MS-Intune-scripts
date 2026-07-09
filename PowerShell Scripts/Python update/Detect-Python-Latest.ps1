@@ -3,26 +3,24 @@
     Intune Proactive Remediation - DETECTION script for Python.
 
 .DESCRIPTION
-    Compares installed Python version(s) on this device against the latest
-    stable release published on python.org.
+    Compares installed Python version(s) against latest stable release on python.org.
 
-    Exit 0 = compliant (single, latest Python version installed)
-    Exit 1 = non-compliant (Python missing, outdated, or multiple versions found)
-             -> triggers the paired remediation script.
-
-    Deploy this as the "Detection script" in an Intune Remediation, running
-    in SYSTEM context, 64-bit PowerShell.
+    Exit 0 = compliant  (one Python install, matches latest version)
+    Exit 1 = non-compliant (triggers remediation)
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# Force TLS 1.2 so SYSTEM account can reach python.org
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 function Get-LatestPythonRelease {
     try {
-        $uri = "https://www.python.org/api/v2/downloads/release/?is_published=true&pre_release=false"
+        $uri     = "https://www.python.org/api/v2/downloads/release/?is_published=true&pre_release=false&page_size=50"
         $releases = Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 30
-        $stable = $releases | Where-Object { $_.name -match '^Python (\d+\.\d+\.\d+)$' }
-        $sorted = $stable | Sort-Object { [version]($_.name -replace '^Python ', '') } -Descending
-        return [version]($sorted[0].name -replace '^Python ', '')
+        $stable  = $releases.results | Where-Object { $_.name -match '^Python (\d+\.\d+\.\d+)$' }
+        $sorted  = $stable | Sort-Object { [version]($_.name -replace '^Python ','') } -Descending
+        return [version]($sorted[0].name -replace '^Python ','')
     }
     catch {
         return $null
@@ -36,7 +34,7 @@ function Get-InstalledPythonVersions {
         'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
     )
     $apps = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -match '^Python \d+\.\d+\.\d+' }
+                Where-Object { $_.DisplayName -match '^Python \d+\.\d+\.\d+' }
 
     $versions = foreach ($a in $apps) {
         if ($a.DisplayName -match '^Python (\d+\.\d+\.\d+)') {
@@ -50,8 +48,7 @@ $latest    = Get-LatestPythonRelease
 $installed = Get-InstalledPythonVersions
 
 if (-not $latest) {
-    # Couldn't reach python.org / parse response - don't force a remediation loop on a transient network issue
-    Write-Output "Could not determine latest Python version from python.org. Skipping this run."
+    Write-Output "Could not determine latest Python version — transient network issue. Skipping."
     exit 0
 }
 
@@ -61,14 +58,14 @@ if (-not $installed -or $installed.Count -eq 0) {
 }
 
 if ($installed.Count -gt 1) {
-    Write-Output "Multiple Python versions detected: $($installed -join ', '). Remediation required."
+    Write-Output "Multiple Python versions found: $($installed -join ', '). Remediation required."
     exit 1
 }
 
 if ($installed[0] -lt $latest) {
-    Write-Output "Installed Python $($installed[0]) is older than latest available $latest. Remediation required."
+    Write-Output "Installed Python $($installed[0]) is older than latest $latest. Remediation required."
     exit 1
 }
 
-Write-Output "Python $($installed[0]) is up to date (latest available: $latest)."
+Write-Output "Python $($installed[0]) is up to date (latest: $latest). Compliant."
 exit 0
