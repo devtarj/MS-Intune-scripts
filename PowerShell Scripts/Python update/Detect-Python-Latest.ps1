@@ -1,71 +1,108 @@
 <#
 .SYNOPSIS
-    Intune Proactive Remediation - DETECTION script for Python.
+    Intune Proactive Remediation - Detection Script
+    Checks whether Python (winget ID: Python.Python.3) is at the latest available version.
+    Runs as SYSTEM.
 
-.DESCRIPTION
-    Compares installed Python version(s) against latest stable release on python.org.
-
-    Exit 0 = compliant  (one Python install, matches latest version)
-    Exit 1 = non-compliant (triggers remediation)
+.EXIT CODES
+    0 = Compliant (Python installed and up to date)
+    1 = Non-compliant (missing, outdated, or unable to verify) -> triggers remediation
 #>
 
-$ErrorActionPreference = 'SilentlyContinue'
+$logPath = "C:\ProgramData\IntuneLogs\PythonVersionCheck.log"
+New-Item -Path (Split-Path $logPath) -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
 
-# Force TLS 1.2 so SYSTEM account can reach python.org
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-function Get-LatestPythonRelease {
-    try {
-        $uri     = "https://www.python.org/api/v2/downloads/release/?is_published=true&pre_release=false&page_size=50"
-        $releases = Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 30
-        $stable  = $releases.results | Where-Object { $_.name -match '^Python (\d+\.\d+\.\d+)$' }
-        $sorted  = $stable | Sort-Object { [version]($_.name -replace '^Python ','') } -Descending
-        return [version]($sorted[0].name -replace '^Python ','')
-    }
-    catch {
-        return $null
-    }
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $Message" | Out-File -FilePath $logPath -Append -Encoding utf8
 }
 
-function Get-InstalledPythonVersions {
-    $paths = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    )
-    $apps = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName -match '^Python \d+\.\d+\.\d+' }
+try {
+    Write-Log "=== Detection started ==="
 
-    $versions = foreach ($a in $apps) {
-        if ($a.DisplayName -match '^Python (\d+\.\d+\.\d+)') {
-            try { [version]$Matches[1] } catch {}
+    # --- SYSTEM context fixes ---
+    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
+    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    # --- Locate winget.exe (Get-ChildItem fails silently under SYSTEM due to WindowsApps ACLs) ---
+    $wingetPath = $null
+    $searchResult = cmd /c "dir /b /s `"C:\Program Files\WindowsApps\winget.exe`" 2>nul"
+    if ($searchResult) {
+        $wingetPath = ($searchResult -split "`r`n" | Select-Object -First 1).Trim()
+    }
+
+    if (-not $wingetPath -or -not (Test-Path $wingetPath)) {
+        Write-Log "winget.exe not found. Cannot verify Python version."
+        Write-Output "winget not found"
+        exit 1
+    }
+    Write-Log "winget found at: $wingetPath"
+
+    # Refresh sources so 'latest version' is accurate (best effort, ignore failures)
+    & $wingetPath source update --accept-source-agreements 2>&1 | Out-Null
+
+    # --- Installed version via winget list ---
+    $listOutput = & $wingetPath list --id Python.Python.3 --accept-source-agreements 2>&1
+    Write-Log "winget list output: $($listOutput -join ' | ')"
+
+    $installedVersion = $null
+    foreach ($line in $listOutput) {
+        if ($line -match 'Python\.Python\.3\S*\s+([\d\.]+)') {
+            $installedVersion = $matches[1]
+            break
         }
     }
-    return $versions | Sort-Object -Unique
+
+    # Fallback: py launcher, in case winget's tracked package doesn't match reality
+    if (-not $installedVersion) {
+        $pyCheck = cmd /c "py -3 --version 2>&1"
+        if ($pyCheck -match '(\d+\.\d+\.\d+)') {
+            $installedVersion = $matches[1]
+        }
+    }
+
+    if (-not $installedVersion) {
+        Write-Log "Python is not installed on this device."
+        Write-Output "Python not installed"
+        exit 1
+    }
+    Write-Log "Installed Python version: $installedVersion"
+
+    # --- Latest available version via winget show ---
+    $showOutput = & $wingetPath show --id Python.Python.3 --accept-source-agreements 2>&1
+    Write-Log "winget show output: $($showOutput -join ' | ')"
+
+    $latestVersion = $null
+    foreach ($line in $showOutput) {
+        if ($line -match '^Version:\s*([\d\.]+)') {
+            $latestVersion = $matches[1]
+            break
+        }
+    }
+
+    if (-not $latestVersion) {
+        Write-Log "Could not determine latest available Python version from winget show."
+        Write-Output "Unable to determine latest version"
+        exit 1
+    }
+    Write-Log "Latest available Python version: $latestVersion"
+
+    # --- Compare ---
+    if ([version]$installedVersion -lt [version]$latestVersion) {
+        Write-Log "Update required: $installedVersion -> $latestVersion"
+        Write-Output "Update required: $installedVersion -> $latestVersion"
+        exit 1
+    }
+    else {
+        Write-Log "Python is up to date."
+        Write-Output "Python is up to date ($installedVersion)"
+        exit 0
+    }
 }
-
-$latest    = Get-LatestPythonRelease
-$installed = Get-InstalledPythonVersions
-
-if (-not $latest) {
-    Write-Output "Could not determine latest Python version — transient network issue. Skipping."
-    exit 0
-}
-
-if (-not $installed -or $installed.Count -eq 0) {
-    Write-Output "Python is not installed. Remediation required."
+catch {
+    Write-Log "ERROR: $($_.Exception.Message)"
+    Write-Output "Detection error: $($_.Exception.Message)"
     exit 1
 }
-
-if ($installed.Count -gt 1) {
-    Write-Output "Multiple Python versions found: $($installed -join ', '). Remediation required."
-    exit 1
-}
-
-if ($installed[0] -lt $latest) {
-    Write-Output "Installed Python $($installed[0]) is older than latest $latest. Remediation required."
-    exit 1
-}
-
-Write-Output "Python $($installed[0]) is up to date (latest: $latest). Compliant."
-exit 0
