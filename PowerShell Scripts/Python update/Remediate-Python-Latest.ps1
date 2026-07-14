@@ -42,19 +42,20 @@ try {
     & $wingetPath source update --accept-source-agreements 2>&1 | Out-Null
 
     # --- Determine install vs upgrade ---
-    $listOutput = & $wingetPath list --id Python.Python.3 --accept-source-agreements 2>&1
+    # --exact avoids substring matches against Python.Python.3.12, Python.Python.3.13, etc.
+    $listOutput = & $wingetPath list --id Python.Python.3 --exact --accept-source-agreements 2>&1
     $isInstalled = ($listOutput -join "`n") -match 'Python\.Python\.3'
 
     if ($isInstalled) {
         Write-Log "Python found. Attempting upgrade..."
-        $result = & $wingetPath upgrade --id Python.Python.3 --silent `
+        $result = & $wingetPath upgrade --id Python.Python.3 --exact --silent `
             --accept-package-agreements --accept-source-agreements `
             --disable-interactivity 2>&1
         Write-Log "Upgrade output: $($result -join ' | ')"
     }
     else {
         Write-Log "Python not found. Attempting fresh install..."
-        $result = & $wingetPath install --id Python.Python.3 --silent `
+        $result = & $wingetPath install --id Python.Python.3 --exact --silent `
             --accept-package-agreements --accept-source-agreements `
             --disable-interactivity 2>&1
         Write-Log "Install output: $($result -join ' | ')"

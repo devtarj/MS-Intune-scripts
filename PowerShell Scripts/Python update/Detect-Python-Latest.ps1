@@ -44,7 +44,9 @@ try {
     & $wingetPath source update --accept-source-agreements 2>&1 | Out-Null
 
     # --- Installed version via winget list ---
-    $listOutput = & $wingetPath list --id Python.Python.3 --accept-source-agreements 2>&1
+    # --exact is required: without it, "Python.Python.3" substring-matches every
+    # Python.Python.3.x package too, which can return zero/ambiguous results.
+    $listOutput = & $wingetPath list --id Python.Python.3 --exact --accept-source-agreements 2>&1
     Write-Log "winget list output: $($listOutput -join ' | ')"
 
     $installedVersion = $null
@@ -71,15 +73,27 @@ try {
     Write-Log "Installed Python version: $installedVersion"
 
     # --- Latest available version via winget show ---
-    $showOutput = & $wingetPath show --id Python.Python.3 --accept-source-agreements 2>&1
+    $showOutput = & $wingetPath show --id Python.Python.3 --exact --accept-source-agreements 2>&1
     Write-Log "winget show output: $($showOutput -join ' | ')"
 
+    $showText = ($showOutput -join "`n")
+
+    if ($showText -match 'Multiple packages found') {
+        Write-Log "ERROR: --exact still returned multiple matches. Raw output above."
+        Write-Output "Ambiguous package match - see log"
+        exit 1
+    }
+    if ($showText -match 'No package found') {
+        Write-Log "ERROR: winget show found no package for Python.Python.3."
+        Write-Output "Package not found in winget source"
+        exit 1
+    }
+
     $latestVersion = $null
-    foreach ($line in $showOutput) {
-        if ($line -match '^Version:\s*([\d\.]+)') {
-            $latestVersion = $matches[1]
-            break
-        }
+    # Match "Version:" anywhere in the joined text, not just line-start, to survive
+    # console-width wrapping under the non-interactive SYSTEM session.
+    if ($showText -match 'Version:\s*([\d][\d\.]*)') {
+        $latestVersion = $matches[1]
     }
 
     if (-not $latestVersion) {
