@@ -40,8 +40,21 @@ try {
     }
     Write-Log "winget found at: $wingetPath"
 
+    # --- Ensure winget source is registered for the SYSTEM profile ---
+    # SYSTEM rarely has a source already registered (source registration lives per-profile),
+    # which causes every query to silently return "No package found" regardless of the ID.
+    $sourceListOutput = & $wingetPath source list 2>&1
+    Write-Log "winget source list (before repair): $($sourceListOutput -join ' | ')"
+
+    if (-not (($sourceListOutput -join "`n") -match 'winget')) {
+        Write-Log "winget source missing or unregistered for SYSTEM. Attempting reset/re-add..."
+        & $wingetPath source reset --force 2>&1 | ForEach-Object { Write-Log "source reset: $_" }
+        & $wingetPath source add --name winget --arg https://cdn.winget.microsoft.com/cache --type "Microsoft.PreIndexed.Package" --accept-source-agreements 2>&1 | ForEach-Object { Write-Log "source add: $_" }
+    }
+
     # Refresh sources so 'latest version' is accurate (best effort, ignore failures)
-    & $wingetPath source update --accept-source-agreements 2>&1 | Out-Null
+    $sourceUpdateOutput = & $wingetPath source update --accept-source-agreements 2>&1
+    Write-Log "winget source update output: $($sourceUpdateOutput -join ' | ')"
 
     # --- Installed version via winget list ---
     # --exact is required: without it, "Python.Python.3" substring-matches every

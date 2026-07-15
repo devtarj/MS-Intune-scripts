@@ -39,7 +39,18 @@ try {
     }
     Write-Log "winget found at: $wingetPath"
 
-    & $wingetPath source update --accept-source-agreements 2>&1 | Out-Null
+    # --- Ensure winget source is registered for the SYSTEM profile ---
+    $sourceListOutput = & $wingetPath source list 2>&1
+    Write-Log "winget source list (before repair): $($sourceListOutput -join ' | ')"
+
+    if (-not (($sourceListOutput -join "`n") -match 'winget')) {
+        Write-Log "winget source missing or unregistered for SYSTEM. Attempting reset/re-add..."
+        & $wingetPath source reset --force 2>&1 | ForEach-Object { Write-Log "source reset: $_" }
+        & $wingetPath source add --name winget --arg https://cdn.winget.microsoft.com/cache --type "Microsoft.PreIndexed.Package" --accept-source-agreements 2>&1 | ForEach-Object { Write-Log "source add: $_" }
+    }
+
+    $sourceUpdateOutput = & $wingetPath source update --accept-source-agreements 2>&1
+    Write-Log "winget source update output: $($sourceUpdateOutput -join ' | ')"
 
     # --- Determine install vs upgrade ---
     # --exact avoids substring matches against Python.Python.3.12, Python.Python.3.13, etc.
