@@ -1,8 +1,12 @@
 <#
 .SYNOPSIS
     Intune Proactive Remediation - Detection Script
-    Checks whether Python (winget ID: Python.Python.3) is at the latest available version.
-    Runs as SYSTEM.
+    Checks whether the highest installed Python version matches the latest
+    stable release published on python.org. Runs as SYSTEM.
+
+    Does NOT use winget - source registration is unreliable under the SYSTEM
+    account. Instead reads installed versions from the registry and checks
+    the latest version via the public endoflife.date API.
 
 .EXIT CODES
     0 = Compliant (Python installed and up to date)
@@ -19,102 +23,63 @@ function Write-Log {
 }
 
 try {
-    Write-Log "=== Detection started ==="
-
-    # --- SYSTEM context fixes ---
-    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
-    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
+    Write-Log "=== Detection started (registry + python.org method) ==="
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    # --- Locate winget.exe (Get-ChildItem fails silently under SYSTEM due to WindowsApps ACLs) ---
-    $wingetPath = $null
-    $searchResult = cmd /c "dir /b /s `"C:\Program Files\WindowsApps\winget.exe`" 2>nul"
-    if ($searchResult) {
-        $wingetPath = ($searchResult -split "`r`n" | Select-Object -First 1).Trim()
+    # --- Installed version(s) via Uninstall registry keys ---
+    # InstallAllUsers=1 installs register under HKLM, which is what we check for
+    # and what the remediation script also uses - so detection and remediation agree.
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    $fullVersions = @()
+    foreach ($path in $uninstallPaths) {
+        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match '^Python 3\.\d+\.\d+' } |
+            ForEach-Object {
+                if ($_.DisplayVersion -match '^\d+\.\d+\.\d+') {
+                    $fullVersions += $_.DisplayVersion
+                }
+            }
     }
 
-    if (-not $wingetPath -or -not (Test-Path $wingetPath)) {
-        Write-Log "winget.exe not found. Cannot verify Python version."
-        Write-Output "winget not found"
-        exit 1
-    }
-    Write-Log "winget found at: $wingetPath"
+    Write-Log "Full installed versions found: $($fullVersions -join ', ')"
 
-    # --- Ensure winget source is registered for the SYSTEM profile ---
-    # SYSTEM rarely has a source already registered (source registration lives per-profile),
-    # which causes every query to silently return "No package found" regardless of the ID.
-    $sourceListOutput = & $wingetPath source list 2>&1
-    Write-Log "winget source list (before repair): $($sourceListOutput -join ' | ')"
-
-    if (-not (($sourceListOutput -join "`n") -match 'winget')) {
-        Write-Log "winget source missing or unregistered for SYSTEM. Attempting reset/re-add..."
-        & $wingetPath source reset --force 2>&1 | ForEach-Object { Write-Log "source reset: $_" }
-        & $wingetPath source add --name winget --arg https://cdn.winget.microsoft.com/cache --type "Microsoft.PreIndexed.Package" --accept-source-agreements 2>&1 | ForEach-Object { Write-Log "source add: $_" }
-    }
-
-    # Refresh sources so 'latest version' is accurate (best effort, ignore failures)
-    $sourceUpdateOutput = & $wingetPath source update --accept-source-agreements 2>&1
-    Write-Log "winget source update output: $($sourceUpdateOutput -join ' | ')"
-
-    # --- Installed version via winget list ---
-    # --exact is required: without it, "Python.Python.3" substring-matches every
-    # Python.Python.3.x package too, which can return zero/ambiguous results.
-    $listOutput = & $wingetPath list --id Python.Python.3 --exact --accept-source-agreements 2>&1
-    Write-Log "winget list output: $($listOutput -join ' | ')"
-
-    $installedVersion = $null
-    foreach ($line in $listOutput) {
-        if ($line -match 'Python\.Python\.3\S*\s+([\d\.]+)') {
-            $installedVersion = $matches[1]
-            break
-        }
-    }
-
-    # Fallback: py launcher, in case winget's tracked package doesn't match reality
-    if (-not $installedVersion) {
-        $pyCheck = cmd /c "py -3 --version 2>&1"
-        if ($pyCheck -match '(\d+\.\d+\.\d+)') {
-            $installedVersion = $matches[1]
-        }
-    }
-
-    if (-not $installedVersion) {
-        Write-Log "Python is not installed on this device."
+    if ($fullVersions.Count -eq 0) {
+        Write-Log "Python not found via registry."
         Write-Output "Python not installed"
         exit 1
     }
-    Write-Log "Installed Python version: $installedVersion"
 
-    # --- Latest available version via winget show ---
-    $showOutput = & $wingetPath show --id Python.Python.3 --exact --accept-source-agreements 2>&1
-    Write-Log "winget show output: $($showOutput -join ' | ')"
+    $installedVersion = ($fullVersions | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1).ToString()
+    Write-Log "Highest installed Python version: $installedVersion"
 
-    $showText = ($showOutput -join "`n")
-
-    if ($showText -match 'Multiple packages found') {
-        Write-Log "ERROR: --exact still returned multiple matches. Raw output above."
-        Write-Output "Ambiguous package match - see log"
-        exit 1
+    # --- Latest available stable version via endoflife.date API ---
+    try {
+        $releases = Invoke-RestMethod -Uri "https://endoflife.date/api/python.json" -UseBasicParsing -TimeoutSec 30
     }
-    if ($showText -match 'No package found') {
-        Write-Log "ERROR: winget show found no package for Python.Python.3."
-        Write-Output "Package not found in winget source"
+    catch {
+        Write-Log "ERROR: Failed to query endoflife.date API: $($_.Exception.Message)"
+        Write-Output "Unable to reach version API"
         exit 1
     }
 
-    $latestVersion = $null
-    # Match "Version:" anywhere in the joined text, not just line-start, to survive
-    # console-width wrapping under the non-interactive SYSTEM session.
-    if ($showText -match 'Version:\s*([\d][\d\.]*)') {
-        $latestVersion = $matches[1]
-    }
+    $stableLatest = $releases |
+        Where-Object { $_.latest -match '^\d+\.\d+\.\d+$' } |
+        ForEach-Object { [version]$_.latest } |
+        Sort-Object -Descending |
+        Select-Object -First 1
 
-    if (-not $latestVersion) {
-        Write-Log "Could not determine latest available Python version from winget show."
+    if (-not $stableLatest) {
+        Write-Log "ERROR: Could not parse latest version from API response."
         Write-Output "Unable to determine latest version"
         exit 1
     }
-    Write-Log "Latest available Python version: $latestVersion"
+
+    $latestVersion = $stableLatest.ToString()
+    Write-Log "Latest available stable Python version: $latestVersion"
 
     # --- Compare ---
     if ([version]$installedVersion -lt [version]$latestVersion) {
