@@ -1,8 +1,16 @@
 <#
 .SYNOPSIS
     Intune Proactive Remediation - Remediation Script
-    Installs Python if missing, or upgrades it to the latest version via winget.
-    Runs as SYSTEM.
+    Downloads the latest stable Python installer directly from python.org
+    and installs it silently for all users. Runs as SYSTEM.
+
+    Does NOT use winget - same reasoning as the detection script.
+
+    NOTE: Installs the new version alongside any existing one rather than
+    uninstalling the old version first, so this cannot break anything that
+    depends on the previously installed Python. Detection will report
+    compliant once the newer version is present, since it checks the
+    HIGHEST installed version.
 
 .EXIT CODES
     0 = Success
@@ -19,69 +27,71 @@ function Write-Log {
 }
 
 try {
-    Write-Log "=== Remediation started ==="
-
-    # --- SYSTEM context fixes ---
-    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
-    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
+    Write-Log "=== Remediation started (python.org direct installer method) ==="
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    # --- Locate winget.exe ---
-    $wingetPath = $null
-    $searchResult = cmd /c "dir /b /s `"C:\Program Files\WindowsApps\winget.exe`" 2>nul"
-    if ($searchResult) {
-        $wingetPath = ($searchResult -split "`r`n" | Select-Object -First 1).Trim()
+    # --- Get latest stable version from endoflife.date API ---
+    try {
+        $releases = Invoke-RestMethod -Uri "https://endoflife.date/api/python.json" -UseBasicParsing -TimeoutSec 30
     }
-
-    if (-not $wingetPath -or -not (Test-Path $wingetPath)) {
-        Write-Log "ERROR: winget.exe not found. Cannot proceed."
+    catch {
+        Write-Log "ERROR: Failed to query endoflife.date API: $($_.Exception.Message)"
         exit 1
     }
-    Write-Log "winget found at: $wingetPath"
 
-    # --- Ensure winget source is registered for the SYSTEM profile ---
-    $sourceListOutput = & $wingetPath source list 2>&1
-    Write-Log "winget source list (before repair): $($sourceListOutput -join ' | ')"
+    $stableLatest = $releases |
+        Where-Object { $_.latest -match '^\d+\.\d+\.\d+$' } |
+        ForEach-Object { [version]$_.latest } |
+        Sort-Object -Descending |
+        Select-Object -First 1
 
-    if (-not (($sourceListOutput -join "`n") -match 'winget')) {
-        Write-Log "winget source missing or unregistered for SYSTEM. Attempting reset/re-add..."
-        & $wingetPath source reset --force 2>&1 | ForEach-Object { Write-Log "source reset: $_" }
-        & $wingetPath source add --name winget --arg https://cdn.winget.microsoft.com/cache --type "Microsoft.PreIndexed.Package" --accept-source-agreements 2>&1 | ForEach-Object { Write-Log "source add: $_" }
+    if (-not $stableLatest) {
+        Write-Log "ERROR: Could not parse latest version from API response."
+        exit 1
+    }
+    $latestVersion = $stableLatest.ToString()
+    Write-Log "Target version: $latestVersion"
+
+    # --- Download official installer (64-bit) ---
+    $installerUrl  = "https://www.python.org/ftp/python/$latestVersion/python-$latestVersion-amd64.exe"
+    $installerPath = Join-Path $env:TEMP "python-$latestVersion-amd64.exe"
+
+    Write-Log "Downloading from $installerUrl"
+    try {
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing -TimeoutSec 300
+    }
+    catch {
+        Write-Log "ERROR: Download failed: $($_.Exception.Message)"
+        exit 1
     }
 
-    $sourceUpdateOutput = & $wingetPath source update --accept-source-agreements 2>&1
-    Write-Log "winget source update output: $($sourceUpdateOutput -join ' | ')"
-
-    # --- Determine install vs upgrade ---
-    # --exact avoids substring matches against Python.Python.3.12, Python.Python.3.13, etc.
-    $listOutput = & $wingetPath list --id Python.Python.3 --exact --accept-source-agreements 2>&1
-    $isInstalled = ($listOutput -join "`n") -match 'Python\.Python\.3'
-
-    if ($isInstalled) {
-        Write-Log "Python found. Attempting upgrade..."
-        $result = & $wingetPath upgrade --id Python.Python.3 --exact --silent `
-            --accept-package-agreements --accept-source-agreements `
-            --disable-interactivity 2>&1
-        Write-Log "Upgrade output: $($result -join ' | ')"
+    if (-not (Test-Path $installerPath)) {
+        Write-Log "ERROR: Installer not found on disk after download attempt."
+        exit 1
     }
-    else {
-        Write-Log "Python not found. Attempting fresh install..."
-        $result = & $wingetPath install --id Python.Python.3 --exact --silent `
-            --accept-package-agreements --accept-source-agreements `
-            --disable-interactivity 2>&1
-        Write-Log "Install output: $($result -join ' | ')"
-    }
+    Write-Log "Download complete: $installerPath ($((Get-Item $installerPath).Length) bytes)"
 
-    $exitCode = $LASTEXITCODE
-    Write-Log "winget exit code: $exitCode"
+    # --- Silent install ---
+    # InstallAllUsers=1  -> installs to Program Files, registers under HKLM (matches detection script)
+    # PrependPath=1      -> adds this version to PATH ahead of others
+    # Include_test=0     -> skip the bundled test suite, smaller footprint
+    # No stdout/stderr redirection on Start-Process - that has crashed under SYSTEM before.
+    $installArgs = "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0"
+    Write-Log "Running installer silently with args: $installArgs"
 
-    # 0 = success. -1978335189 (0x8A15002B) = "no applicable update found" - treat as success too.
-    if ($exitCode -eq 0 -or $exitCode -eq -1978335189) {
-        Write-Log "Python updated/installed successfully (or already current)."
+    $proc = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru
+    $exitCode = $proc.ExitCode
+    Write-Log "Installer exit code: $exitCode"
+
+    Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+
+    # Python.org installer: 0 = success, 3010 = success but reboot recommended
+    if ($exitCode -eq 0 -or $exitCode -eq 3010) {
+        Write-Log "Python $latestVersion installed successfully."
         exit 0
     }
     else {
-        Write-Log "winget returned non-zero exit code: $exitCode"
+        Write-Log "Installer returned non-zero exit code: $exitCode"
         exit 1
     }
 }
