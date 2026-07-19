@@ -5,8 +5,9 @@
     stable release published on python.org. Runs as SYSTEM.
 
     Does NOT use winget - source registration is unreliable under the SYSTEM
-    account. Instead reads installed versions from the registry and checks
-    the latest version via the public endoflife.date API.
+    account. Instead scans known install locations for python.exe directly
+    (works for both all-users and per-user installs) and checks the latest
+    version via the public endoflife.date API.
 
 .EXIT CODES
     0 = Compliant (Python installed and up to date)
@@ -23,32 +24,44 @@ function Write-Log {
 }
 
 try {
-    Write-Log "=== Detection started (registry + python.org method) ==="
+    Write-Log "=== Detection started (filesystem scan + python.org method) ==="
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    # --- Installed version(s) via Uninstall registry keys ---
-    # InstallAllUsers=1 installs register under HKLM, which is what we check for
-    # and what the remediation script also uses - so detection and remediation agree.
-    $uninstallPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    # --- Installed version(s): scan known install locations directly ---
+    # Registry alone is unreliable here: the python.org installer only writes to
+    # HKLM when InstallAllUsers=1 was used. A per-user "install for me only" run
+    # (the installer's default) registers under that user's HKCU hive instead,
+    # which SYSTEM cannot see - producing a false "not installed" result.
+    # Checking python.exe directly on disk works regardless of install mode.
+    $pythonExePatterns = @(
+        "C:\Program Files\Python3*\python.exe",
+        "C:\Program Files (x86)\Python3*\python.exe",
+        "C:\Users\*\AppData\Local\Programs\Python\Python3*\python.exe"
     )
 
+    $foundExes = foreach ($pattern in $pythonExePatterns) {
+        Get-Item -Path $pattern -ErrorAction SilentlyContinue
+    }
+
+    Write-Log "python.exe paths found: $(($foundExes | ForEach-Object { $_.FullName }) -join ', ')"
+
     $fullVersions = @()
-    foreach ($path in $uninstallPaths) {
-        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -match '^Python 3\.\d+\.\d+' } |
-            ForEach-Object {
-                if ($_.DisplayVersion -match '^\d+\.\d+\.\d+') {
-                    $fullVersions += $_.DisplayVersion
-                }
+    foreach ($exe in $foundExes) {
+        try {
+            $verOutput = & $exe.FullName --version 2>&1
+            if ($verOutput -match '(\d+\.\d+\.\d+)') {
+                $fullVersions += $matches[1]
             }
+        }
+        catch {
+            Write-Log "Could not query version from $($exe.FullName): $($_.Exception.Message)"
+        }
     }
 
     Write-Log "Full installed versions found: $($fullVersions -join ', ')"
 
     if ($fullVersions.Count -eq 0) {
-        Write-Log "Python not found via registry."
+        Write-Log "Python not found in any known install location."
         Write-Output "Python not installed"
         exit 1
     }
