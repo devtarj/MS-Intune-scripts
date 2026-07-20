@@ -15,6 +15,7 @@
 .EXIT CODES
     0 = Success
     1 = Failure
+    #Check for 003 device
 #>
 
 $logPath = "C:\ProgramData\IntuneLogs\PythonUpdate.log"
