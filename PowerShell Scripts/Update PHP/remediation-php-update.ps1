@@ -180,14 +180,71 @@ try {
     if ($newVerOutput -match 'PHP\s+(\d+\.\d+\.\d+)') { $newVersion = $Matches[1] }
     Write-Log "Post-update version reported: $newVersion"
 
-    if ($newVersion -and ([version]$newVersion -ge [version]$latestVersion)) {
-        Write-Log "SUCCESS: PHP updated to $newVersion"
-        Write-Host "PHP updated to $newVersion"
-        exit 0
-    }
-    else {
+    if (-not ($newVersion -and ([version]$newVersion -ge [version]$latestVersion))) {
         throw "Post-update verification failed - php.exe reports '$newVersion', expected '$latestVersion'"
     }
+    Write-Log "SUCCESS: PHP updated to $newVersion"
+
+    # --- 11. Register an ARP (Add/Remove Programs) entry ---------------------------
+    # PHP's zip distribution never writes one itself, which is why Intune's
+    # "Discovered apps" inventory (registry-based) shows PHP as absent even though
+    # it's really on disk - this is purely cosmetic so it shows up in Intune/Company
+    # Portal app inventory going forward; it doesn't affect PHP's functionality.
+    try {
+        $arpKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PHP-$branch"
+        New-Item -Path $arpKey -Force | Out-Null
+        Set-ItemProperty -Path $arpKey -Name "DisplayName" -Value "PHP $branch (Windows build)"
+        Set-ItemProperty -Path $arpKey -Name "DisplayVersion" -Value $newVersion
+        Set-ItemProperty -Path $arpKey -Name "Publisher" -Value "PHP Group (windows.php.net build)"
+        Set-ItemProperty -Path $arpKey -Name "InstallLocation" -Value $installDir
+        Set-ItemProperty -Path $arpKey -Name "InstallDate" -Value (Get-Date -Format "yyyyMMdd")
+        Set-ItemProperty -Path $arpKey -Name "UninstallString" -Value "REM Managed by Intune Proactive Remediation - remove $installDir manually if needed"
+        Set-ItemProperty -Path $arpKey -Name "NoModify" -Value 1 -Type DWord
+        Set-ItemProperty -Path $arpKey -Name "NoRepair" -Value 1 -Type DWord
+        Write-Log "ARP entry updated: $arpKey (DisplayVersion=$newVersion)"
+    }
+    catch {
+        Write-Log "WARNING: Could not write ARP entry - $($_.Exception.Message) (non-fatal, update itself succeeded)"
+    }
+
+    # --- 12. Trigger an Intune sync and a Defender/MDE check-in ---------------------
+    # Intune: kick the enrollment client's own scheduled sync task - this is the
+    # same mechanism the "Sync" button in Company Portal triggers, just local.
+    try {
+        $syncTask = Get-ScheduledTask -TaskName "PushLaunch" -ErrorAction SilentlyContinue |
+            Where-Object { $_.TaskPath -like "*EnterpriseMgmt*" } | Select-Object -First 1
+        if ($syncTask) {
+            Start-ScheduledTask -TaskPath $syncTask.TaskPath -TaskName $syncTask.TaskName
+            Write-Log "Triggered Intune sync via scheduled task $($syncTask.TaskPath)$($syncTask.TaskName)"
+        }
+        else {
+            Write-Log "WARNING: Intune enrollment sync task (PushLaunch) not found - device may not be MDM-enrolled via this mechanism, or task name has changed"
+        }
+    }
+    catch {
+        Write-Log "WARNING: Intune sync trigger failed - $($_.Exception.Message)"
+    }
+
+    # Defender for Endpoint: restart the Sense sensor service to force an
+    # immediate check-in with the cloud. Note this speeds up the *next* heartbeat/
+    # inventory push - TVM (vulnerability) findings still refresh on Microsoft's
+    # own scan cadence server-side and aren't instantly forceable beyond this.
+    try {
+        $senseService = Get-Service -Name "Sense" -ErrorAction SilentlyContinue
+        if ($senseService) {
+            Restart-Service -Name "Sense" -Force -ErrorAction SilentlyContinue
+            Write-Log "Restarted Defender for Endpoint (Sense) service to force a check-in"
+        }
+        else {
+            Write-Log "Sense service not found - Defender for Endpoint sensor may not be installed on this device"
+        }
+    }
+    catch {
+        Write-Log "WARNING: Sense service restart failed - $($_.Exception.Message)"
+    }
+
+    Write-Host "PHP updated to $newVersion (Intune + Defender sync triggered)"
+    exit 0
 }
 catch {
     Write-Log "ERROR: $($_.Exception.Message)"
