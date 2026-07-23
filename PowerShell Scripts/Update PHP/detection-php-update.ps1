@@ -26,7 +26,12 @@ $SearchRoots = @(
     "C:\php",
     "C:\Program Files\PHP",
     "C:\Program Files (x86)\PHP",
-    "C:\tools\php"
+    "C:\tools\php",
+    "C:\xampp\php",
+    "C:\wamp64\bin\php",
+    "C:\wamp\bin\php",
+    "C:\laragon\bin\php",
+    "C:\inetpub\php"
 )
 
 $LogFile = "C:\ProgramData\IntuneLogs\PHP-Detect.log"

@@ -24,7 +24,12 @@ $SearchRoots = @(
     "C:\php",
     "C:\Program Files\PHP",
     "C:\Program Files (x86)\PHP",
-    "C:\tools\php"
+    "C:\tools\php",
+    "C:\xampp\php",
+    "C:\wamp64\bin\php",
+    "C:\wamp\bin\php",
+    "C:\laragon\bin\php",
+    "C:\inetpub\php"
 )
 
 # Windows services to stop/start around the file copy so locked DLLs/exe don't
