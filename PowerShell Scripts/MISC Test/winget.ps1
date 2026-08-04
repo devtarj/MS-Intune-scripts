@@ -1,6 +1,6 @@
 $before = (Get-Process).Id
 
-winget upgrade --all --silent --accept-source-agreements --accept-package-agreements
+winget upgrade --all --silent --accept-source-agreements --accept-package-agreements --include-unknown
 
 Start-Sleep -Seconds 5
 
