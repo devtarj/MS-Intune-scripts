@@ -16,5 +16,3 @@ catch {
     Write-Output "FAILED: $($_.Exception.Message)"
     exit 1
 }
-
-#under testing
