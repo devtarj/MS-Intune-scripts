@@ -1,5 +1,5 @@
 # ============================================================
-# Remediation: winget upgrade --all with auto-launch suppression
+# Remediation: winget presence check + upgrade --all with auto-launch suppression
 # Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
@@ -21,9 +21,11 @@ try {
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
 
     if (-not $wingetPath) {
-        Write-Log "FAILED: winget.exe not found on device."
+        Write-Log "FAILED: winget.exe not found on device. App Installer is likely not installed - this is an environment issue, not a script error. Deploy App Installer to this device before this remediation can run."
         exit 1
     }
+
+    Write-Log "winget.exe found at: $wingetPath"
 
     # --- SYSTEM profile env overrides so winget's source cache resolves correctly ---
     $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
