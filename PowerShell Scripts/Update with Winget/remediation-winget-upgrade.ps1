@@ -1,5 +1,5 @@
 # ============================================================
-# Remediation: winget presence check + upgrade --all with auto-launch suppression
+# Remediation: winget presence check + per-package upgrade with diagnostics
 # Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
@@ -16,74 +16,121 @@ function Write-Log {
     Write-Output $Message
 }
 
-function Invoke-WingetUpgradeAll {
+# Known winget / installer exit codes, for a readable reason in the log
+# instead of just a raw number.
+$exitCodeMeanings = @{
+    0            = "Success"
+    3010         = "Success - reboot required"
+    -1978335189  = "No applicable update found"
+    -1978335212  = "No newer version available for this package"
+    -1978335216  = "Install failed"
+    -1978335215  = "Installer download failed"
+    1618         = "Another installation is already in progress (MSI mutex locked)"
+    1603         = "Fatal error during installation"
+    5            = "Access denied"
+}
+
+function Get-ExitCodeMeaning {
+    param([int]$Code)
+    if ($exitCodeMeanings.ContainsKey($Code)) { return $exitCodeMeanings[$Code] }
+    return "Unrecognized exit code - check winget/installer docs"
+}
+
+# Parses winget's table output into structured rows using the header's
+# column positions, so we get each package's actual Name/Id rather than
+# just raw text.
+function Get-PendingPackages {
     param([string]$WingetPath)
 
-    # --include-unknown: upgrade packages winget can't verify the current version for
-    #                    (silently skipped otherwise - this is the #1 cause of "listed
-    #                    but never actually upgraded")
-    # --force:           bypass winget treating a package as "already handled" and
-    #                    actually reinstall/upgrade it
-    $output = & $WingetPath upgrade --all --silent --include-unknown --force `
-        --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
-    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+    $raw = & $WingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
+    $lines = $raw -split "`r?`n"
+
+    $headerLine = $lines | Where-Object { $_ -match '^Name\s+Id\s+Version' } | Select-Object -First 1
+    if (-not $headerLine) { return @() }
+
+    $idPos = $headerLine.IndexOf("Id")
+    $versionPos = $headerLine.IndexOf("Version")
+    $availPos = $headerLine.IndexOf("Available")
+    $sourcePos = $headerLine.IndexOf("Source")
+
+    $headerIndex = [array]::IndexOf($lines, $headerLine)
+    $results = @()
+
+    for ($i = $headerIndex + 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line.Trim() -eq '' -or $line -match '^-+\s*$') { continue }
+        if ($line -match '^\d+ upgrades? available' -or $line -match 'source agreements') { break }
+        if ($line.Length -le $idPos) { continue }
+
+        $name = $line.Substring(0, $idPos).Trim()
+        $id = if ($versionPos -gt $idPos -and $line.Length -gt $idPos) {
+            $endIdx = [Math]::Min($versionPos, $line.Length)
+            $line.Substring($idPos, $endIdx - $idPos).Trim()
+        } else { "" }
+
+        if ($id -ne "") {
+            $results += [PSCustomObject]@{ Name = $name; Id = $id }
+        }
+    }
+    return $results
 }
 
 try {
-    # --- Locate winget.exe (Get-Command fails under SYSTEM due to WindowsApps ACLs) ---
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
 
     if (-not $wingetPath) {
-        Write-Log "FAILED: winget.exe not found on device. App Installer is likely not installed - this is an environment issue, not a script error. Deploy App Installer to this device before this remediation can run."
+        Write-Log "FAILED: winget.exe not found on device. App Installer is likely not installed."
         exit 1
     }
 
     Write-Log "winget.exe found at: $wingetPath"
 
-    # --- SYSTEM profile env overrides so winget's source cache resolves correctly ---
     $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
     $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
 
-    # --- Snapshot process IDs before the upgrade ---
     $before = (Get-Process).Id
 
-    # --- Pass 1 ---
-    Write-Log "Starting upgrade pass 1..."
-    $pass1 = Invoke-WingetUpgradeAll -WingetPath $wingetPath
-    Write-Log "Pass 1 exit code: $($pass1.ExitCode)"
-    Write-Log $pass1.Output
+    $pending = Get-PendingPackages -WingetPath $wingetPath
 
-    # --- Confirm what's left; retry once if anything remains ---
-    # (some packages fail a first pass because the app was in use, or a transient
-    # download/lock issue - a second pass clears most of these)
-    $remaining = & $wingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
-    $stillPending = -not ($remaining -match "No installed package found" -or $remaining -match "No applicable update found")
+    if ($pending.Count -eq 0) {
+        Write-Log "No pending packages found at remediation time (may have been resolved since detection ran)."
+        exit 0
+    }
 
-    if ($stillPending) {
-        Write-Log "Packages still pending after pass 1 - running pass 2..."
-        Start-Sleep -Seconds 5
-        $pass2 = Invoke-WingetUpgradeAll -WingetPath $wingetPath
-        Write-Log "Pass 2 exit code: $($pass2.ExitCode)"
-        Write-Log $pass2.Output
+    Write-Log "Found $($pending.Count) pending package(s): $($pending.Id -join ', ')"
+
+    $stillFailing = @()
+
+    foreach ($pkg in $pending) {
+        Write-Log "--- Upgrading: $($pkg.Name) [$($pkg.Id)] ---"
+        $output = & $wingetPath upgrade --id $pkg.Id --exact --silent --include-unknown --force `
+            --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $meaning = Get-ExitCodeMeaning -Code $code
+
+        Write-Log "Exit code: $code ($meaning)"
+        Write-Log $output
+
+        if ($code -ne 0 -and $code -ne 3010 -and $code -ne -1978335189) {
+            $stillFailing += [PSCustomObject]@{ Id = $pkg.Id; Code = $code; Meaning = $meaning }
+        }
     }
 
     Start-Sleep -Seconds 5
 
-    # --- Close any package that auto-launched a UI window post-update ---
+    # Close anything that auto-launched a UI window post-update
     Get-Process | Where-Object { $before -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
         Stop-Process -Force -ErrorAction SilentlyContinue
 
-    # --- Final check: did everything actually clear? ---
-    $final = & $wingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
-    $finalPending = -not ($final -match "No installed package found" -or $final -match "No applicable update found")
-
-    if ($finalPending) {
-        Write-Log "REMEDIATION INCOMPLETE: Packages remain after retry. Final listing below - check for packages requiring manual intervention (e.g. blocked by an interactive prompt winget can't suppress)."
-        Write-Log $final
+    if ($stillFailing.Count -gt 0) {
+        Write-Log "REMEDIATION INCOMPLETE. Packages that did not upgrade:"
+        foreach ($f in $stillFailing) {
+            Write-Log "  $($f.Id): exit $($f.Code) - $($f.Meaning)"
+        }
         exit 1
     }
 
-    Write-Log "Remediation successful - all packages upgraded."
+    Write-Log "Remediation successful - all pending packages upgraded."
     exit 0
 }
 catch {
