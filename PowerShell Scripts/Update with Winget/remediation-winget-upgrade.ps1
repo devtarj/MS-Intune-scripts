@@ -16,6 +16,19 @@ function Write-Log {
     Write-Output $Message
 }
 
+function Invoke-WingetUpgradeAll {
+    param([string]$WingetPath)
+
+    # --include-unknown: upgrade packages winget can't verify the current version for
+    #                    (silently skipped otherwise - this is the #1 cause of "listed
+    #                    but never actually upgraded")
+    # --force:           bypass winget treating a package as "already handled" and
+    #                    actually reinstall/upgrade it
+    $output = & $WingetPath upgrade --all --silent --include-unknown --force `
+        --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+
 try {
     # --- Locate winget.exe (Get-Command fails under SYSTEM due to WindowsApps ACLs) ---
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
@@ -34,9 +47,25 @@ try {
     # --- Snapshot process IDs before the upgrade ---
     $before = (Get-Process).Id
 
-    # --- Run the upgrade (& operator, not Start-Process, under SYSTEM) ---
-    $wingetOutput = & $wingetPath upgrade --all --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
-    $wingetExit = $LASTEXITCODE
+    # --- Pass 1 ---
+    Write-Log "Starting upgrade pass 1..."
+    $pass1 = Invoke-WingetUpgradeAll -WingetPath $wingetPath
+    Write-Log "Pass 1 exit code: $($pass1.ExitCode)"
+    Write-Log $pass1.Output
+
+    # --- Confirm what's left; retry once if anything remains ---
+    # (some packages fail a first pass because the app was in use, or a transient
+    # download/lock issue - a second pass clears most of these)
+    $remaining = & $wingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
+    $stillPending = -not ($remaining -match "No installed package found" -or $remaining -match "No applicable update found")
+
+    if ($stillPending) {
+        Write-Log "Packages still pending after pass 1 - running pass 2..."
+        Start-Sleep -Seconds 5
+        $pass2 = Invoke-WingetUpgradeAll -WingetPath $wingetPath
+        Write-Log "Pass 2 exit code: $($pass2.ExitCode)"
+        Write-Log $pass2.Output
+    }
 
     Start-Sleep -Seconds 5
 
@@ -44,19 +73,18 @@ try {
     Get-Process | Where-Object { $before -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
         Stop-Process -Force -ErrorAction SilentlyContinue
 
-    Write-Log "Winget exit code: $wingetExit"
-    Write-Log $wingetOutput
+    # --- Final check: did everything actually clear? ---
+    $final = & $wingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
+    $finalPending = -not ($final -match "No installed package found" -or $final -match "No applicable update found")
 
-    # --- Exit code handling ---
-    # 0                = success
-    # -1978335189      = no applicable update found (treat as success)
-    # 3010             = reboot required
-    switch ($wingetExit) {
-        0             { Write-Log "Remediation successful."; exit 0 }
-        -1978335189   { Write-Log "No applicable updates found - treated as success."; exit 0 }
-        3010          { Write-Log "Updates applied, reboot required."; exit 0 }
-        default       { Write-Log "Remediation completed with non-zero exit code: $wingetExit"; exit 1 }
+    if ($finalPending) {
+        Write-Log "REMEDIATION INCOMPLETE: Packages remain after retry. Final listing below - check for packages requiring manual intervention (e.g. blocked by an interactive prompt winget can't suppress)."
+        Write-Log $final
+        exit 1
     }
+
+    Write-Log "Remediation successful - all packages upgraded."
+    exit 0
 }
 catch {
     Write-Log "FAILED: $($_.Exception.Message)"

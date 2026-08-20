@@ -17,10 +17,10 @@ try {
     $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
 
     # --- Check for pending updates ---
-    # NOTE: plain "winget upgrade" always exits 0 on a successful query, whether
-    # or not updates exist - the exit code cannot be used to decide compliance here.
-    # Only the output text tells you if anything is actually pending.
-    $result = & $wingetPath upgrade --accept-source-agreements 2>&1 | Out-String
+    # --include-unknown matches what remediation will actually attempt to upgrade;
+    # without it, packages winget can't verify a current version for are hidden here
+    # too, which would make detection and remediation disagree on what's pending.
+    $result = & $wingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
 
     if ($result -match "No installed package found" -or $result -match "No applicable update found") {
         Write-Output "COMPLIANT: No pending updates."
