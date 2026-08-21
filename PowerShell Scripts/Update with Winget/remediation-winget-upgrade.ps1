@@ -75,6 +75,16 @@ function Get-PendingPackages {
     return $results
 }
 
+# Known shared-framework/runtime packages that winget lists as "upgradable"
+# but that should NOT be force-upgraded - they're side-by-side runtime
+# dependencies other apps rely on staying at their current version, and
+# forcing an upgrade/reinstall on them reliably fails or breaks the apps
+# that depend on them. Add to this list as you discover more.
+$excludedPackageIds = @(
+    "Microsoft.UI.Xaml.2.7",
+    "Microsoft.UI.Xaml.2.8"
+)
+
 try {
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
 
@@ -102,6 +112,11 @@ try {
     $stillFailing = @()
 
     foreach ($pkg in $pending) {
+        if ($excludedPackageIds -contains $pkg.Id) {
+            Write-Log "Skipping $($pkg.Id) - known shared-framework package, excluded from forced upgrade."
+            continue
+        }
+
         Write-Log "--- Upgrading: $($pkg.Name) [$($pkg.Id)] ---"
         $output = & $wingetPath upgrade --id $pkg.Id --exact --silent --include-unknown --force `
             --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
