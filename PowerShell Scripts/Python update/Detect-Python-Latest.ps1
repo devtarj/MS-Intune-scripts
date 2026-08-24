@@ -1,113 +1,78 @@
-<#
-.SYNOPSIS
-    Intune Proactive Remediation - Detection Script
-    Checks whether the highest installed Python version matches the latest
-    stable release published on python.org. Runs as SYSTEM.
+# ============================================================
+# Detection: Python outdated version check (MDE vulnerability remediation)
+# Intune Proactive Remediation - SYSTEM context
+# ============================================================
 
-    Does NOT use winget - source registration is unreliable under the SYSTEM
-    account. Instead scans known install locations for python.exe directly
-    (works for both all-users and per-user installs) and checks the latest
-    version via the public endoflife.date API.
+function Get-PendingPackages {
+    param([string]$WingetPath)
 
-.EXIT CODES
-    0 = Compliant (Python installed and up to date)
-    1 = Non-compliant (missing, outdated, or unable to verify) -> triggers remediation
-#>
+    $raw = & $WingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
+    $lines = $raw -split "`r?`n"
 
-$logPath = "C:\ProgramData\IntuneLogs\PythonVersionCheck.log"
-New-Item -Path (Split-Path $logPath) -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    $headerLine = $lines | Where-Object { $_ -match '^Name\s+Id\s+Version' } | Select-Object -First 1
+    if (-not $headerLine) { return @() }
 
-function Write-Log {
-    param([string]$Message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp - $Message" | Out-File -FilePath $logPath -Append -Encoding utf8
+    $idPos = $headerLine.IndexOf("Id")
+    $versionPos = $headerLine.IndexOf("Version")
+    $availPos = $headerLine.IndexOf("Available")
+    $headerIndex = [array]::IndexOf($lines, $headerLine)
+    $results = @()
+
+    for ($i = $headerIndex + 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line.Trim() -eq '' -or $line -match '^-+\s*$') { continue }
+        if ($line -match '^\d+ upgrades? available' -or $line -match 'source agreements') { break }
+        if ($line.Length -le $idPos) { continue }
+
+        $name = $line.Substring(0, $idPos).Trim()
+        $id = if ($versionPos -gt $idPos -and $line.Length -gt $idPos) {
+            $endIdx = [Math]::Min($versionPos, $line.Length)
+            $line.Substring($idPos, $endIdx - $idPos).Trim()
+        } else { "" }
+        $currentVer = if ($availPos -gt $versionPos -and $line.Length -gt $versionPos) {
+            $endIdx = [Math]::Min($availPos, $line.Length)
+            $line.Substring($versionPos, $endIdx - $versionPos).Trim()
+        } else { "" }
+
+        if ($id -ne "") {
+            $results += [PSCustomObject]@{ Name = $name; Id = $id; CurrentVersion = $currentVer }
+        }
+    }
+    return $results
 }
 
 try {
-    Write-Log "=== Detection started (filesystem scan + python.org method) ==="
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
 
-    # --- Installed version(s): scan known install locations directly ---
-    # Registry alone is unreliable here: the python.org installer only writes to
-    # HKLM when InstallAllUsers=1 was used. A per-user "install for me only" run
-    # (the installer's default) registers under that user's HKCU hive instead,
-    # which SYSTEM cannot see - producing a false "not installed" result.
-    # Checking python.exe directly on disk works regardless of install mode.
-    $pythonExePatterns = @(
-        "C:\Program Files\Python3*\python.exe",
-        "C:\Program Files (x86)\Python3*\python.exe",
-        "C:\Users\*\AppData\Local\Programs\Python\Python3*\python.exe"
-    )
-
-    $foundExes = foreach ($pattern in $pythonExePatterns) {
-        Get-Item -Path $pattern -ErrorAction SilentlyContinue
+    if (-not $wingetPath) {
+        Write-Output "NONCOMPLIANT: winget.exe not found on device. App Installer may not be installed."
+        exit 1
     }
 
-    Write-Log "python.exe paths found: $(($foundExes | ForEach-Object { $_.FullName }) -join ', ')"
+    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
+    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
 
-    $fullVersions = @()
-    foreach ($exe in $foundExes) {
-        try {
-            $verOutput = & $exe.FullName --version 2>&1
-            if ($verOutput -match '(\d+\.\d+\.\d+)') {
-                $fullVersions += $matches[1]
-            }
+    $pending = Get-PendingPackages -WingetPath $wingetPath
+    $pythonPending = $pending | Where-Object { $_.Id -like "Python.Python.*" }
+
+    if ($pythonPending.Count -eq 0) {
+        # Also confirm winget actually sees a Python install at all, so a device
+        # where Python is invisible to SYSTEM (e.g. installed user-scope only)
+        # is distinguishable from one that's genuinely up to date.
+        $installed = & $wingetPath list --id Python.Python --accept-source-agreements 2>&1 | Out-String
+        if ($installed -match "No installed package found") {
+            Write-Output "COMPLIANT: winget sees no Python installation on this device (may be installed in a scope SYSTEM can't see - verify separately if Defender still flags this device)."
+        } else {
+            Write-Output "COMPLIANT: Python is up to date."
         }
-        catch {
-            Write-Log "Could not query version from $($exe.FullName): $($_.Exception.Message)"
-        }
-    }
-
-    Write-Log "Full installed versions found: $($fullVersions -join ', ')"
-
-    if ($fullVersions.Count -eq 0) {
-        Write-Log "Python not found in any known install location."
-        Write-Output "Python not installed"
-        exit 1
-    }
-
-    $installedVersion = ($fullVersions | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1).ToString()
-    Write-Log "Highest installed Python version: $installedVersion"
-
-    # --- Latest available stable version via endoflife.date API ---
-    try {
-        $releases = Invoke-RestMethod -Uri "https://endoflife.date/api/python.json" -UseBasicParsing -TimeoutSec 30
-    }
-    catch {
-        Write-Log "ERROR: Failed to query endoflife.date API: $($_.Exception.Message)"
-        Write-Output "Unable to reach version API"
-        exit 1
-    }
-
-    $stableLatest = $releases |
-        Where-Object { $_.latest -match '^\d+\.\d+\.\d+$' } |
-        ForEach-Object { [version]$_.latest } |
-        Sort-Object -Descending |
-        Select-Object -First 1
-
-    if (-not $stableLatest) {
-        Write-Log "ERROR: Could not parse latest version from API response."
-        Write-Output "Unable to determine latest version"
-        exit 1
-    }
-
-    $latestVersion = $stableLatest.ToString()
-    Write-Log "Latest available stable Python version: $latestVersion"
-
-    # --- Compare ---
-    if ([version]$installedVersion -lt [version]$latestVersion) {
-        Write-Log "Update required: $installedVersion -> $latestVersion"
-        Write-Output "Update required: $installedVersion -> $latestVersion"
-        exit 1
-    }
-    else {
-        Write-Log "Python is up to date."
-        Write-Output "Python is up to date ($installedVersion)"
         exit 0
     }
+
+    $details = $pythonPending | ForEach-Object { "$($_.Id) (current: $($_.CurrentVersion))" }
+    Write-Output "NONCOMPLIANT: Python update(s) pending: $($details -join '; ')"
+    exit 1
 }
 catch {
-    Write-Log "ERROR: $($_.Exception.Message)"
-    Write-Output "Detection error: $($_.Exception.Message)"
+    Write-Output "NONCOMPLIANT: Detection error - $($_.Exception.Message)"
     exit 1
 }
