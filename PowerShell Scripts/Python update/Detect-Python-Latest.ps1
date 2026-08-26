@@ -1,6 +1,7 @@
 # ============================================================
-# Detection: Python outdated version check (MDE vulnerability remediation)
-# Intune Proactive Remediation - SYSTEM context
+# Detection: Python outdated version check - USER CONTEXT
+# Intune Proactive Remediation - runs as logged-on user
+# (catches per-user Python installs invisible to the SYSTEM-context version)
 # ============================================================
 
 function Get-PendingPackages {
@@ -42,29 +43,24 @@ function Get-PendingPackages {
 }
 
 try {
+    # Note: NO SYSTEM profile env overrides here - this runs as the logged-on
+    # user, whose LOCALAPPDATA/USERPROFILE are already correct. Overriding them
+    # (as the SYSTEM-context script does) would be wrong in this context.
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
-
     if (-not $wingetPath) {
-        Write-Output "NONCOMPLIANT: winget.exe not found on device. App Installer may not be installed."
-        exit 1
+        $wingetPath = (cmd /c dir /b /s "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
     }
 
-    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
-    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
+    if (-not $wingetPath) {
+        Write-Output "NONCOMPLIANT: winget.exe not found for this user."
+        exit 1
+    }
 
     $pending = Get-PendingPackages -WingetPath $wingetPath
     $pythonPending = $pending | Where-Object { $_.Id -like "Python.Python.*" }
 
     if ($pythonPending.Count -eq 0) {
-        # Also confirm winget actually sees a Python install at all, so a device
-        # where Python is invisible to SYSTEM (e.g. installed user-scope only)
-        # is distinguishable from one that's genuinely up to date.
-        $installed = & $wingetPath list --id Python.Python --accept-source-agreements 2>&1 | Out-String
-        if ($installed -match "No installed package found") {
-            Write-Output "COMPLIANT: winget sees no Python installation on this device (may be installed in a scope SYSTEM can't see - verify separately if Defender still flags this device)."
-        } else {
-            Write-Output "COMPLIANT: Python is up to date."
-        }
+        Write-Output "COMPLIANT: No pending Python updates visible to this user."
         exit 0
     }
 

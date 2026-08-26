@@ -1,13 +1,13 @@
 # ============================================================
-# Remediation: Python update (MDE vulnerability remediation)
-# Intune Proactive Remediation - SYSTEM context
+# Remediation: Python update - USER CONTEXT
+# Intune Proactive Remediation - runs as logged-on user
 # ============================================================
 
-$logDir = "C:\ProgramData\IntuneLogs"
+$logDir = "$env:LOCALAPPDATA\IntuneLogs"
 if (-not (Test-Path $logDir)) {
     New-Item -Path $logDir -ItemType Directory -Force | Out-Null
 }
-$logFile = Join-Path $logDir "PythonUpdate-Remediation.log"
+$logFile = Join-Path $logDir "PythonUpdate-UserContext-Remediation.log"
 
 function Write-Log {
     param([string]$Message)
@@ -22,7 +22,7 @@ $exitCodeMeanings = @{
     -1978335189  = "No applicable update found"
     -1978335216  = "Install failed"
     -1978335215  = "Installer download failed"
-    1618         = "Another installation is already in progress (MSI mutex locked)"
+    1618         = "Another installation is already in progress"
     1603         = "Fatal error during installation"
     5            = "Access denied"
 }
@@ -68,16 +68,16 @@ function Get-PendingPackages {
 
 try {
     $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
+    if (-not $wingetPath) {
+        $wingetPath = (cmd /c dir /b /s "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
+    }
 
     if (-not $wingetPath) {
-        Write-Log "FAILED: winget.exe not found on device. App Installer is likely not installed."
+        Write-Log "FAILED: winget.exe not found for this user."
         exit 1
     }
 
     Write-Log "winget.exe found at: $wingetPath"
-
-    $env:LOCALAPPDATA = "C:\Windows\System32\config\systemprofile\AppData\Local"
-    $env:USERPROFILE  = "C:\Windows\System32\config\systemprofile"
 
     $before = (Get-Process).Id
 
@@ -85,7 +85,7 @@ try {
     $pythonPending = $pending | Where-Object { $_.Id -like "Python.Python.*" }
 
     if ($pythonPending.Count -eq 0) {
-        Write-Log "No pending Python updates found at remediation time (may have been resolved since detection ran, or Python is not visible to SYSTEM's winget - e.g. installed in user scope)."
+        Write-Log "No pending Python updates found at remediation time."
         exit 0
     }
 
@@ -110,7 +110,6 @@ try {
 
     Start-Sleep -Seconds 5
 
-    # Close anything that auto-launched a UI window post-update (e.g. IDLE)
     Get-Process | Where-Object { $before -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
         Stop-Process -Force -ErrorAction SilentlyContinue
 
