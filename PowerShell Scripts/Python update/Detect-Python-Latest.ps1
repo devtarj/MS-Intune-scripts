@@ -1,71 +1,69 @@
 # ============================================================
-# Detection: Python outdated version check - USER CONTEXT
-# Intune Proactive Remediation - runs as logged-on user
-# (catches per-user Python installs invisible to the SYSTEM-context version)
+# Detection: Python version check across ALL scopes (machine + every user)
+# Compares against the absolute latest stable python.org release.
+# Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
-function Get-PendingPackages {
-    param([string]$WingetPath)
+function Get-LatestPythonVersion {
+    # Parses python.org's FTP index for the highest stable (non-alpha/beta/rc) release
+    $index = Invoke-WebRequest -Uri "https://www.python.org/ftp/python/" -UseBasicParsing
+    $versions = ($index.Links.href | Where-Object { $_ -match '^\d+\.\d+\.\d+/$' }) -replace '/$', ''
+    $latest = $versions | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1
+    return $latest.ToString()
+}
 
-    $raw = & $WingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
-    $lines = $raw -split "`r?`n"
+function Get-AllPythonInstalls {
+    $installs = @()
 
-    $headerLine = $lines | Where-Object { $_ -match '^Name\s+Id\s+Version' } | Select-Object -First 1
-    if (-not $headerLine) { return @() }
+    # --- Machine-wide install locations ---
+    $machinePaths = @()
+    $machinePaths += Get-ChildItem "$env:ProgramFiles\Python*\python.exe" -ErrorAction SilentlyContinue
+    $machinePaths += Get-ChildItem "${env:ProgramFiles(x86)}\Python*\python.exe" -ErrorAction SilentlyContinue
 
-    $idPos = $headerLine.IndexOf("Id")
-    $versionPos = $headerLine.IndexOf("Version")
-    $availPos = $headerLine.IndexOf("Available")
-    $headerIndex = [array]::IndexOf($lines, $headerLine)
-    $results = @()
-
-    for ($i = $headerIndex + 1; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if ($line.Trim() -eq '' -or $line -match '^-+\s*$') { continue }
-        if ($line -match '^\d+ upgrades? available' -or $line -match 'source agreements') { break }
-        if ($line.Length -le $idPos) { continue }
-
-        $name = $line.Substring(0, $idPos).Trim()
-        $id = if ($versionPos -gt $idPos -and $line.Length -gt $idPos) {
-            $endIdx = [Math]::Min($versionPos, $line.Length)
-            $line.Substring($idPos, $endIdx - $idPos).Trim()
-        } else { "" }
-        $currentVer = if ($availPos -gt $versionPos -and $line.Length -gt $versionPos) {
-            $endIdx = [Math]::Min($availPos, $line.Length)
-            $line.Substring($versionPos, $endIdx - $versionPos).Trim()
-        } else { "" }
-
-        if ($id -ne "") {
-            $results += [PSCustomObject]@{ Name = $name; Id = $id; CurrentVersion = $currentVer }
+    foreach ($exe in $machinePaths) {
+        $verOutput = & $exe.FullName --version 2>&1
+        if ($verOutput -match '(\d+\.\d+\.\d+)') {
+            $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "Machine"; SID = $null }
         }
     }
-    return $results
+
+    # --- Per-user install locations (filesystem scan, works regardless of hive access) ---
+    $userDirs = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin @("Public", "Default", "Default User", "All Users") }
+
+    foreach ($userDir in $userDirs) {
+        $pyExes = Get-ChildItem "$($userDir.FullName)\AppData\Local\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue
+        foreach ($exe in $pyExes) {
+            $verOutput = & $exe.FullName --version 2>&1
+            if ($verOutput -match '(\d+\.\d+\.\d+)') {
+                $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "User:$($userDir.Name)"; SID = $null }
+            }
+        }
+    }
+
+    return $installs
 }
 
 try {
-    # Note: NO SYSTEM profile env overrides here - this runs as the logged-on
-    # user, whose LOCALAPPDATA/USERPROFILE are already correct. Overriding them
-    # (as the SYSTEM-context script does) would be wrong in this context.
-    $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
-    if (-not $wingetPath) {
-        $wingetPath = (cmd /c dir /b /s "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
-    }
+    $latest = Get-LatestPythonVersion
+    Write-Output "Latest stable Python release: $latest"
 
-    if (-not $wingetPath) {
-        Write-Output "NONCOMPLIANT: winget.exe not found for this user."
-        exit 1
-    }
+    $installs = Get-AllPythonInstalls
 
-    $pending = Get-PendingPackages -WingetPath $wingetPath
-    $pythonPending = $pending | Where-Object { $_.Id -like "Python.Python.*" }
-
-    if ($pythonPending.Count -eq 0) {
-        Write-Output "COMPLIANT: No pending Python updates visible to this user."
+    if ($installs.Count -eq 0) {
+        Write-Output "COMPLIANT: No Python installations found on disk."
         exit 0
     }
 
-    $details = $pythonPending | ForEach-Object { "$($_.Id) (current: $($_.CurrentVersion))" }
-    Write-Output "NONCOMPLIANT: Python update(s) pending: $($details -join '; ')"
+    $outdated = $installs | Where-Object { [version]$_.Version -lt [version]$latest }
+
+    if ($outdated.Count -eq 0) {
+        Write-Output "COMPLIANT: All found Python installs ($($installs.Count)) are already at the latest version."
+        exit 0
+    }
+
+    $details = $outdated | ForEach-Object { "$($_.Version) [$($_.Scope)] at $($_.Path)" }
+    Write-Output "NONCOMPLIANT: Outdated Python install(s) found: $($details -join '; ')"
     exit 1
 }
 catch {

@@ -1,13 +1,14 @@
 # ============================================================
-# Remediation: Python update - USER CONTEXT
-# Intune Proactive Remediation - runs as logged-on user
+# Remediation: Remove all outdated Python installs (any scope) and
+# install the latest stable release machine-wide.
+# Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
-$logDir = "$env:LOCALAPPDATA\IntuneLogs"
+$logDir = "C:\ProgramData\IntuneLogs"
 if (-not (Test-Path $logDir)) {
     New-Item -Path $logDir -ItemType Directory -Force | Out-Null
 }
-$logFile = Join-Path $logDir "PythonUpdate-UserContext-Remediation.log"
+$logFile = Join-Path $logDir "PythonReplace-Remediation.log"
 
 function Write-Log {
     param([string]$Message)
@@ -16,112 +17,177 @@ function Write-Log {
     Write-Output $Message
 }
 
-$exitCodeMeanings = @{
-    0            = "Success"
-    3010         = "Success - reboot required"
-    -1978335189  = "No applicable update found"
-    -1978335216  = "Install failed"
-    -1978335215  = "Installer download failed"
-    1618         = "Another installation is already in progress"
-    1603         = "Fatal error during installation"
-    5            = "Access denied"
+function Get-LatestPythonVersion {
+    $index = Invoke-WebRequest -Uri "https://www.python.org/ftp/python/" -UseBasicParsing
+    $versions = ($index.Links.href | Where-Object { $_ -match '^\d+\.\d+\.\d+/$' }) -replace '/$', ''
+    $latest = $versions | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1
+    return $latest.ToString()
 }
 
-function Get-ExitCodeMeaning {
-    param([int]$Code)
-    if ($exitCodeMeanings.ContainsKey($Code)) { return $exitCodeMeanings[$Code] }
-    return "Unrecognized exit code - check winget/installer docs"
-}
+function Get-AllPythonInstalls {
+    $installs = @()
 
-function Get-PendingPackages {
-    param([string]$WingetPath)
+    $machinePaths = @()
+    $machinePaths += Get-ChildItem "$env:ProgramFiles\Python*\python.exe" -ErrorAction SilentlyContinue
+    $machinePaths += Get-ChildItem "${env:ProgramFiles(x86)}\Python*\python.exe" -ErrorAction SilentlyContinue
 
-    $raw = & $WingetPath upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
-    $lines = $raw -split "`r?`n"
-
-    $headerLine = $lines | Where-Object { $_ -match '^Name\s+Id\s+Version' } | Select-Object -First 1
-    if (-not $headerLine) { return @() }
-
-    $idPos = $headerLine.IndexOf("Id")
-    $versionPos = $headerLine.IndexOf("Version")
-    $headerIndex = [array]::IndexOf($lines, $headerLine)
-    $results = @()
-
-    for ($i = $headerIndex + 1; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if ($line.Trim() -eq '' -or $line -match '^-+\s*$') { continue }
-        if ($line -match '^\d+ upgrades? available' -or $line -match 'source agreements') { break }
-        if ($line.Length -le $idPos) { continue }
-
-        $name = $line.Substring(0, $idPos).Trim()
-        $id = if ($versionPos -gt $idPos -and $line.Length -gt $idPos) {
-            $endIdx = [Math]::Min($versionPos, $line.Length)
-            $line.Substring($idPos, $endIdx - $idPos).Trim()
-        } else { "" }
-
-        if ($id -ne "") {
-            $results += [PSCustomObject]@{ Name = $name; Id = $id }
+    foreach ($exe in $machinePaths) {
+        $verOutput = & $exe.FullName --version 2>&1
+        if ($verOutput -match '(\d+\.\d+\.\d+)') {
+            $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "Machine"; UserDir = $null }
         }
     }
-    return $results
+
+    $userDirs = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin @("Public", "Default", "Default User", "All Users") }
+
+    foreach ($userDir in $userDirs) {
+        $pyExes = Get-ChildItem "$($userDir.FullName)\AppData\Local\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue
+        foreach ($exe in $pyExes) {
+            $verOutput = & $exe.FullName --version 2>&1
+            if ($verOutput -match '(\d+\.\d+\.\d+)') {
+                $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "User:$($userDir.Name)"; UserDir = $userDir.FullName }
+            }
+        }
+    }
+
+    return $installs
+}
+
+function Get-UserSID {
+    param([string]$Username)
+    $prof = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPath -eq "C:\Users\$Username" }
+    return $prof.SID
+}
+
+function Remove-UserScopedPython {
+    param([string]$Username, [string]$Version)
+
+    $sid = Get-UserSID -Username $Username
+    if (-not $sid) {
+        Write-Log "Could not resolve SID for $Username - skipping registry-based uninstall, will remove folder directly."
+        return $false
+    }
+
+    $hiveKey = "HKU\$sid"
+    $hivePath = "Registry::HKEY_USERS\$sid"
+    $loadedByUs = $false
+
+    if (-not (Test-Path $hivePath)) {
+        $ntUserDat = "C:\Users\$Username\NTUSER.DAT"
+        if (-not (Test-Path $ntUserDat)) {
+            Write-Log "NTUSER.DAT not found for $Username - skipping registry-based uninstall."
+            return $false
+        }
+        $result = cmd /c reg load $hiveKey `"$ntUserDat`" 2>&1
+        Write-Log "reg load result for $Username : $result"
+        $loadedByUs = $true
+    }
+
+    $found = $false
+    try {
+        $uninstallRoot = "$hivePath\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        if (Test-Path $uninstallRoot) {
+            $entries = Get-ChildItem $uninstallRoot -ErrorAction SilentlyContinue
+            foreach ($entry in $entries) {
+                $props = Get-ItemProperty $entry.PSPath -ErrorAction SilentlyContinue
+                if ($props.DisplayName -match "^Python 3\.") {
+                    $uninstallStr = $props.QuietUninstallString
+                    if (-not $uninstallStr) { $uninstallStr = $props.UninstallString }
+
+                    if ($uninstallStr -match '^"([^"]+)"') {
+                        $exePath = $matches[1]
+                    } else {
+                        $exePath = ($uninstallStr -split ' ')[0]
+                    }
+
+                    if (Test-Path $exePath) {
+                        Write-Log "Uninstalling $($props.DisplayName) for $Username via $exePath"
+                        Start-Process -FilePath $exePath -ArgumentList "/uninstall","/quiet" -Wait -NoNewWindow
+                        $found = $true
+                    } else {
+                        Write-Log "Uninstaller exe not found at $exePath for $($props.DisplayName) - will remove folder directly."
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        if ($loadedByUs) {
+            [gc]::Collect()
+            Start-Sleep -Seconds 2
+            $result = cmd /c reg unload $hiveKey 2>&1
+            Write-Log "reg unload result for $Username : $result"
+        }
+    }
+
+    return $found
 }
 
 try {
-    $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
-    if (-not $wingetPath) {
-        $wingetPath = (cmd /c dir /b /s "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
-    }
+    $latest = Get-LatestPythonVersion
+    Write-Log "Latest stable Python release: $latest"
 
-    if (-not $wingetPath) {
-        Write-Log "FAILED: winget.exe not found for this user."
-        exit 1
-    }
+    $installs = Get-AllPythonInstalls
+    $outdated = $installs | Where-Object { [version]$_.Version -lt [version]$latest }
 
-    Write-Log "winget.exe found at: $wingetPath"
-
-    $before = (Get-Process).Id
-
-    $pending = Get-PendingPackages -WingetPath $wingetPath
-    $pythonPending = $pending | Where-Object { $_.Id -like "Python.Python.*" }
-
-    if ($pythonPending.Count -eq 0) {
-        Write-Log "No pending Python updates found at remediation time."
+    if ($outdated.Count -eq 0) {
+        Write-Log "No outdated Python installs found at remediation time."
         exit 0
     }
 
-    Write-Log "Found $($pythonPending.Count) pending Python package(s): $($pythonPending.Id -join ', ')"
+    $summary = ($outdated | ForEach-Object { "$($_.Version) [$($_.Scope)]" }) -join ', '
+    Write-Log "Found $($outdated.Count) outdated install(s): $summary"
 
-    $stillFailing = @()
+    foreach ($install in $outdated) {
+        if ($install.Scope -eq "Machine") {
+            $uninstallKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                                            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue
+            foreach ($key in $uninstallKeys) {
+                $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
+                if ($props.DisplayName -match "^Python $([regex]::Escape($install.Version))") {
+                    $uninstallStr = $props.QuietUninstallString
+                    if (-not $uninstallStr) { $uninstallStr = $props.UninstallString }
+                    if ($uninstallStr -match '^"([^"]+)"') { $exePath = $matches[1] } else { $exePath = ($uninstallStr -split ' ')[0] }
+                    if (Test-Path $exePath) {
+                        Write-Log "Uninstalling machine-wide Python $($install.Version) via $exePath"
+                        Start-Process -FilePath $exePath -ArgumentList "/uninstall","/quiet" -Wait -NoNewWindow
+                    }
+                }
+            }
+        }
+        else {
+            $username = ($install.Scope -split ':')[1]
+            $uninstalled = Remove-UserScopedPython -Username $username -Version $install.Version
 
-    foreach ($pkg in $pythonPending) {
-        Write-Log "--- Upgrading: $($pkg.Name) [$($pkg.Id)] ---"
-        $output = & $wingetPath upgrade --id $pkg.Id --exact --silent --include-unknown --force `
-            --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
-        $code = $LASTEXITCODE
-        $meaning = Get-ExitCodeMeaning -Code $code
-
-        Write-Log "Exit code: $code ($meaning)"
-        Write-Log $output
-
-        if ($code -ne 0 -and $code -ne 3010 -and $code -ne -1978335189) {
-            $stillFailing += [PSCustomObject]@{ Id = $pkg.Id; Code = $code; Meaning = $meaning }
+            if (-not $uninstalled -and (Test-Path (Split-Path $install.Path -Parent))) {
+                Write-Log "Falling back to direct folder removal for $($install.Path)"
+                Remove-Item (Split-Path $install.Path -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
-    Start-Sleep -Seconds 5
+    $installerUrl = "https://www.python.org/ftp/python/$latest/python-$latest-amd64.exe"
+    $installerPath = "C:\Windows\Temp\python-$latest-amd64.exe"
 
-    Get-Process | Where-Object { $before -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Log "Downloading $installerUrl"
+    Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
 
-    if ($stillFailing.Count -gt 0) {
-        Write-Log "REMEDIATION INCOMPLETE. Packages that did not upgrade:"
-        foreach ($f in $stillFailing) {
-            Write-Log "  $($f.Id): exit $($f.Code) - $($f.Meaning)"
-        }
+    Write-Log "Installing Python $latest machine-wide..."
+    $proc = Start-Process -FilePath $installerPath -ArgumentList `
+        "/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","Include_launcher=1" `
+        -Wait -PassThru -NoNewWindow
+
+    Write-Log "Installer exit code: $($proc.ExitCode)"
+    Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+        Write-Log "REMEDIATION INCOMPLETE: Installer failed with exit code $($proc.ExitCode)."
         exit 1
     }
 
-    Write-Log "Remediation successful - Python updated."
+    Write-Log "Remediation successful - Python $latest installed machine-wide, old versions removed."
     exit 0
 }
 catch {
