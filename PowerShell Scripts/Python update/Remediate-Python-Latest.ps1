@@ -1,6 +1,8 @@
 # ============================================================
-# Remediation: Remove all outdated Python installs (any scope) and
-# install the latest stable release machine-wide.
+# Remediation: Remove ALL outdated Python interpreter installs (any path,
+# any scope, found via registry) and install the latest stable release
+# machine-wide. Also attempts a winget-based update for Python Launcher
+# (MSIX component) as a separate, best-effort step.
 # Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
@@ -24,17 +26,40 @@ function Get-LatestPythonVersion {
     return $latest.ToString()
 }
 
+function Get-PythonRegistryEntries {
+    param([string]$HiveRoot)
+
+    $paths = @(
+        "$HiveRoot\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "$HiveRoot\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $results = @()
+    foreach ($p in $paths) {
+        Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match '^Python 3\.\d+\.\d+' } |
+            ForEach-Object {
+                if ($_.DisplayVersion -match '(\d+\.\d+\.\d+)') {
+                    $uninstallStr = $_.QuietUninstallString
+                    if (-not $uninstallStr) { $uninstallStr = $_.UninstallString }
+                    $results += [PSCustomObject]@{
+                        DisplayName     = $_.DisplayName
+                        Version         = $matches[1]
+                        InstallLocation = $_.InstallLocation
+                        UninstallString = $uninstallStr
+                    }
+                }
+            }
+    }
+    return $results
+}
+
 function Get-AllPythonInstalls {
     $installs = @()
 
-    $machinePaths = @()
-    $machinePaths += Get-ChildItem "$env:ProgramFiles\Python*\python.exe" -ErrorAction SilentlyContinue
-    $machinePaths += Get-ChildItem "${env:ProgramFiles(x86)}\Python*\python.exe" -ErrorAction SilentlyContinue
-
-    foreach ($exe in $machinePaths) {
-        $verOutput = & $exe.FullName --version 2>&1
-        if ($verOutput -match '(\d+\.\d+\.\d+)') {
-            $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "Machine"; UserDir = $null }
+    Get-PythonRegistryEntries -HiveRoot "HKLM:" | ForEach-Object {
+        $installs += [PSCustomObject]@{
+            DisplayName = $_.DisplayName; Version = $_.Version; InstallLocation = $_.InstallLocation
+            UninstallString = $_.UninstallString; Scope = "Machine"; SID = $null
         }
     }
 
@@ -42,90 +67,74 @@ function Get-AllPythonInstalls {
         Where-Object { $_.Name -notin @("Public", "Default", "Default User", "All Users") }
 
     foreach ($userDir in $userDirs) {
-        $pyExes = Get-ChildItem "$($userDir.FullName)\AppData\Local\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue
-        foreach ($exe in $pyExes) {
-            $verOutput = & $exe.FullName --version 2>&1
-            if ($verOutput -match '(\d+\.\d+\.\d+)') {
-                $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "User:$($userDir.Name)"; UserDir = $userDir.FullName }
+        $sid = (Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPath -eq $userDir.FullName }).SID
+        if (-not $sid) { continue }
+
+        $hivePath = "Registry::HKEY_USERS\$sid"
+        $loadedByUs = $false
+        if (-not (Test-Path $hivePath)) {
+            $ntUserDat = Join-Path $userDir.FullName "NTUSER.DAT"
+            if (-not (Test-Path $ntUserDat)) { continue }
+            cmd /c reg load "HKU\$sid" "`"$ntUserDat`"" 2>&1 | Out-Null
+            $loadedByUs = $true
+        }
+
+        Get-PythonRegistryEntries -HiveRoot $hivePath | ForEach-Object {
+            $installs += [PSCustomObject]@{
+                DisplayName = $_.DisplayName; Version = $_.Version; InstallLocation = $_.InstallLocation
+                UninstallString = $_.UninstallString; Scope = "User:$($userDir.Name)"; SID = $sid
             }
+        }
+
+        # Leave the hive loaded if we loaded it - remediation will unload after uninstall runs,
+        # since the uninstall itself may need to write to that hive.
+        if ($loadedByUs) {
+            $installs | Where-Object { $_.Scope -eq "User:$($userDir.Name)" } | ForEach-Object { $_ | Add-Member -NotePropertyName LoadedHive -NotePropertyValue $true -Force }
         }
     }
 
     return $installs
 }
 
-function Get-UserSID {
-    param([string]$Username)
-    $prof = Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPath -eq "C:\Users\$Username" }
-    return $prof.SID
-}
+function Invoke-PythonUninstall {
+    param([string]$UninstallString, [string]$DisplayName)
 
-function Remove-UserScopedPython {
-    param([string]$Username, [string]$Version)
+    if (-not $UninstallString) {
+        Write-Log "No uninstall string available for $DisplayName - skipping."
+        return $false
+    }
+    if ($UninstallString -match '^"([^"]+)"(.*)$') {
+        $exePath = $matches[1]
+        $existingArgs = $matches[2].Trim()
+    } else {
+        $parts = $UninstallString -split ' ', 2
+        $exePath = $parts[0]
+        $existingArgs = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    }
 
-    $sid = Get-UserSID -Username $Username
-    if (-not $sid) {
-        Write-Log "Could not resolve SID for $Username - skipping registry-based uninstall, will remove folder directly."
+    if (-not (Test-Path $exePath)) {
+        Write-Log "Uninstaller not found at $exePath for $DisplayName - skipping."
         return $false
     }
 
-    $hiveKey = "HKU\$sid"
-    $hivePath = "Registry::HKEY_USERS\$sid"
-    $loadedByUs = $false
+    $argList = "$existingArgs /quiet".Trim()
+    Write-Log "Uninstalling $DisplayName via $exePath $argList"
+    Start-Process -FilePath $exePath -ArgumentList $argList -Wait -NoNewWindow
+    return $true
+}
 
-    if (-not (Test-Path $hivePath)) {
-        $ntUserDat = "C:\Users\$Username\NTUSER.DAT"
-        if (-not (Test-Path $ntUserDat)) {
-            Write-Log "NTUSER.DAT not found for $Username - skipping registry-based uninstall."
-            return $false
-        }
-        $result = cmd /c reg load $hiveKey `"$ntUserDat`" 2>&1
-        Write-Log "reg load result for $Username : $result"
-        $loadedByUs = $true
-    }
+function Update-PythonLauncher {
+    param([string]$WingetPath)
 
-    $found = $false
-    try {
-        $uninstallRoot = "$hivePath\Software\Microsoft\Windows\CurrentVersion\Uninstall"
-        if (Test-Path $uninstallRoot) {
-            $entries = Get-ChildItem $uninstallRoot -ErrorAction SilentlyContinue
-            foreach ($entry in $entries) {
-                $props = Get-ItemProperty $entry.PSPath -ErrorAction SilentlyContinue
-                if ($props.DisplayName -match "^Python 3\.") {
-                    $uninstallStr = $props.QuietUninstallString
-                    if (-not $uninstallStr) { $uninstallStr = $props.UninstallString }
-
-                    if ($uninstallStr -match '^"([^"]+)"') {
-                        $exePath = $matches[1]
-                    } else {
-                        $exePath = ($uninstallStr -split ' ')[0]
-                    }
-
-                    if (Test-Path $exePath) {
-                        Write-Log "Uninstalling $($props.DisplayName) for $Username via $exePath"
-                        Start-Process -FilePath $exePath -ArgumentList "/uninstall","/quiet" -Wait -NoNewWindow
-                        $found = $true
-                    } else {
-                        Write-Log "Uninstaller exe not found at $exePath for $($props.DisplayName) - will remove folder directly."
-                    }
-                }
-            }
-        }
-    }
-    finally {
-        if ($loadedByUs) {
-            [gc]::Collect()
-            Start-Sleep -Seconds 2
-            $result = cmd /c reg unload $hiveKey 2>&1
-            Write-Log "reg unload result for $Username : $result"
-        }
-    }
-
-    return $found
+    Write-Log "--- Checking Python Launcher (MSIX component) ---"
+    $result = & $WingetPath upgrade --id "Python.Launcher" --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-String
+    Write-Log $result
 }
 
 try {
+    $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
+
     $latest = Get-LatestPythonVersion
     Write-Log "Latest stable Python release: $latest"
 
@@ -133,61 +142,63 @@ try {
     $outdated = $installs | Where-Object { [version]$_.Version -lt [version]$latest }
 
     if ($outdated.Count -eq 0) {
-        Write-Log "No outdated Python installs found at remediation time."
-        exit 0
-    }
+        Write-Log "No outdated Python interpreter installs found."
+    } else {
+        $summary = ($outdated | ForEach-Object { "$($_.Version) [$($_.Scope)] at $($_.InstallLocation)" }) -join '; '
+        Write-Log "Found $($outdated.Count) outdated install(s): $summary"
 
-    $summary = ($outdated | ForEach-Object { "$($_.Version) [$($_.Scope)]" }) -join ', '
-    Write-Log "Found $($outdated.Count) outdated install(s): $summary"
+        $loadedSids = @()
+        foreach ($install in $outdated) {
+            Invoke-PythonUninstall -UninstallString $install.UninstallString -DisplayName $install.DisplayName | Out-Null
 
-    foreach ($install in $outdated) {
-        if ($install.Scope -eq "Machine") {
-            $uninstallKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                                            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue
-            foreach ($key in $uninstallKeys) {
-                $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
-                if ($props.DisplayName -match "^Python $([regex]::Escape($install.Version))") {
-                    $uninstallStr = $props.QuietUninstallString
-                    if (-not $uninstallStr) { $uninstallStr = $props.UninstallString }
-                    if ($uninstallStr -match '^"([^"]+)"') { $exePath = $matches[1] } else { $exePath = ($uninstallStr -split ' ')[0] }
-                    if (Test-Path $exePath) {
-                        Write-Log "Uninstalling machine-wide Python $($install.Version) via $exePath"
-                        Start-Process -FilePath $exePath -ArgumentList "/uninstall","/quiet" -Wait -NoNewWindow
-                    }
-                }
+            # Fallback: registry uninstall may leave files behind on some builds - clean the folder too.
+            if ($install.InstallLocation -and (Test-Path $install.InstallLocation)) {
+                Write-Log "Removing residual folder: $($install.InstallLocation)"
+                Remove-Item $install.InstallLocation -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($install.SID -and ($loadedSids -notcontains $install.SID)) {
+                $loadedSids += $install.SID
             }
         }
-        else {
-            $username = ($install.Scope -split ':')[1]
-            $uninstalled = Remove-UserScopedPython -Username $username -Version $install.Version
 
-            if (-not $uninstalled -and (Test-Path (Split-Path $install.Path -Parent))) {
-                Write-Log "Falling back to direct folder removal for $($install.Path)"
-                Remove-Item (Split-Path $install.Path -Parent) -Recurse -Force -ErrorAction SilentlyContinue
-            }
+        # Unload any hives we loaded, now that uninstalls have run
+        foreach ($sid in $loadedSids) {
+            [gc]::Collect()
+            Start-Sleep -Milliseconds 500
+            $result = cmd /c reg unload "HKU\$sid" 2>&1
+            Write-Log "reg unload result for SID $sid : $result"
+        }
+
+        # --- Install latest stable version, machine-wide ---
+        $installerUrl = "https://www.python.org/ftp/python/$latest/python-$latest-amd64.exe"
+        $installerPath = "C:\Windows\Temp\python-$latest-amd64.exe"
+
+        Write-Log "Downloading $installerUrl"
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+
+        Write-Log "Installing Python $latest machine-wide..."
+        $proc = Start-Process -FilePath $installerPath -ArgumentList `
+            "/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","Include_launcher=1" `
+            -Wait -PassThru -NoNewWindow
+
+        Write-Log "Installer exit code: $($proc.ExitCode)"
+        Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            Write-Log "REMEDIATION INCOMPLETE: Interpreter installer failed with exit code $($proc.ExitCode)."
+            exit 1
         }
     }
 
-    $installerUrl = "https://www.python.org/ftp/python/$latest/python-$latest-amd64.exe"
-    $installerPath = "C:\Windows\Temp\python-$latest-amd64.exe"
-
-    Write-Log "Downloading $installerUrl"
-    Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
-
-    Write-Log "Installing Python $latest machine-wide..."
-    $proc = Start-Process -FilePath $installerPath -ArgumentList `
-        "/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","Include_launcher=1" `
-        -Wait -PassThru -NoNewWindow
-
-    Write-Log "Installer exit code: $($proc.ExitCode)"
-    Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
-
-    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-        Write-Log "REMEDIATION INCOMPLETE: Installer failed with exit code $($proc.ExitCode)."
-        exit 1
+    # --- Best-effort Python Launcher update (separate from interpreter, not a hard fail) ---
+    if ($wingetPath) {
+        Update-PythonLauncher -WingetPath $wingetPath
+    } else {
+        Write-Log "winget not found - skipping Python Launcher check."
     }
 
-    Write-Log "Remediation successful - Python $latest installed machine-wide, old versions removed."
+    Write-Log "Remediation successful."
     exit 0
 }
 catch {

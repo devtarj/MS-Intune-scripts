@@ -1,47 +1,95 @@
 # ============================================================
-# Detection: Python version check across ALL scopes (machine + every user)
-# Compares against the absolute latest stable python.org release.
+# Detection: Python version check via registry (any install path,
+# any scope) + Python Launcher (MSIX) check via winget
 # Intune Proactive Remediation - SYSTEM context
 # ============================================================
 
 function Get-LatestPythonVersion {
-    # Parses python.org's FTP index for the highest stable (non-alpha/beta/rc) release
     $index = Invoke-WebRequest -Uri "https://www.python.org/ftp/python/" -UseBasicParsing
     $versions = ($index.Links.href | Where-Object { $_ -match '^\d+\.\d+\.\d+/$' }) -replace '/$', ''
     $latest = $versions | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1
     return $latest.ToString()
 }
 
+# Reads Python entries from a given Uninstall registry root - works for any
+# install location (custom paths like C:\Python are registered here too,
+# unlike a folder-pattern filesystem scan which would miss them).
+function Get-PythonRegistryEntries {
+    param([string]$HiveRoot)
+
+    $paths = @(
+        "$HiveRoot\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "$HiveRoot\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $results = @()
+    foreach ($p in $paths) {
+        Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match '^Python 3\.\d+\.\d+' } |
+            ForEach-Object {
+                if ($_.DisplayVersion -match '(\d+\.\d+\.\d+)') {
+                    $results += [PSCustomObject]@{
+                        DisplayName     = $_.DisplayName
+                        Version         = $matches[1]
+                        InstallLocation = $_.InstallLocation
+                    }
+                }
+            }
+    }
+    return $results
+}
+
 function Get-AllPythonInstalls {
     $installs = @()
 
-    # --- Machine-wide install locations ---
-    $machinePaths = @()
-    $machinePaths += Get-ChildItem "$env:ProgramFiles\Python*\python.exe" -ErrorAction SilentlyContinue
-    $machinePaths += Get-ChildItem "${env:ProgramFiles(x86)}\Python*\python.exe" -ErrorAction SilentlyContinue
-
-    foreach ($exe in $machinePaths) {
-        $verOutput = & $exe.FullName --version 2>&1
-        if ($verOutput -match '(\d+\.\d+\.\d+)') {
-            $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "Machine"; SID = $null }
-        }
+    # Machine scope
+    Get-PythonRegistryEntries -HiveRoot "HKLM:" | ForEach-Object {
+        $installs += [PSCustomObject]@{ DisplayName = $_.DisplayName; Version = $_.Version; InstallLocation = $_.InstallLocation; Scope = "Machine" }
     }
 
-    # --- Per-user install locations (filesystem scan, works regardless of hive access) ---
+    # Per-user scope - load each real user's hive to read their Uninstall key
     $userDirs = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notin @("Public", "Default", "Default User", "All Users") }
 
     foreach ($userDir in $userDirs) {
-        $pyExes = Get-ChildItem "$($userDir.FullName)\AppData\Local\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue
-        foreach ($exe in $pyExes) {
-            $verOutput = & $exe.FullName --version 2>&1
-            if ($verOutput -match '(\d+\.\d+\.\d+)') {
-                $installs += [PSCustomObject]@{ Path = $exe.FullName; Version = $matches[1]; Scope = "User:$($userDir.Name)"; SID = $null }
-            }
+        $sid = (Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPath -eq $userDir.FullName }).SID
+        if (-not $sid) { continue }
+
+        $hivePath = "Registry::HKEY_USERS\$sid"
+        $loadedByUs = $false
+        if (-not (Test-Path $hivePath)) {
+            $ntUserDat = Join-Path $userDir.FullName "NTUSER.DAT"
+            if (-not (Test-Path $ntUserDat)) { continue }
+            cmd /c reg load "HKU\$sid" "`"$ntUserDat`"" 2>&1 | Out-Null
+            $loadedByUs = $true
+        }
+
+        Get-PythonRegistryEntries -HiveRoot $hivePath | ForEach-Object {
+            $installs += [PSCustomObject]@{ DisplayName = $_.DisplayName; Version = $_.Version; InstallLocation = $_.InstallLocation; Scope = "User:$($userDir.Name)" }
+        }
+
+        if ($loadedByUs) {
+            [gc]::Collect()
+            Start-Sleep -Milliseconds 500
+            cmd /c reg unload "HKU\$sid" 2>&1 | Out-Null
         }
     }
 
     return $installs
+}
+
+function Get-PythonLauncherStatus {
+    $wingetPath = (cmd /c dir /b /s "C:\Program Files\WindowsApps\winget.exe" 2>$null) | Select-Object -First 1
+    if (-not $wingetPath) { return "winget not found - cannot check launcher" }
+
+    $result = & $wingetPath upgrade --id "Python.Launcher" --accept-source-agreements 2>&1 | Out-String
+    if ($result -match "No installed package found") {
+        return "not installed via winget-visible source"
+    }
+    if ($result -match "No applicable update found") {
+        return "up to date"
+    }
+    return "update available"
 }
 
 try {
@@ -49,21 +97,20 @@ try {
     Write-Output "Latest stable Python release: $latest"
 
     $installs = Get-AllPythonInstalls
+    $launcherStatus = Get-PythonLauncherStatus
+    Write-Output "Python Launcher status: $launcherStatus"
 
-    if ($installs.Count -eq 0) {
-        Write-Output "COMPLIANT: No Python installations found on disk."
+    $outdatedCore = $installs | Where-Object { [version]$_.Version -lt [version]$latest }
+
+    $needsRemediation = ($outdatedCore.Count -gt 0) -or ($launcherStatus -eq "update available")
+
+    if (-not $needsRemediation) {
+        Write-Output "COMPLIANT: All Python interpreter installs ($($installs.Count)) and the Launcher are up to date."
         exit 0
     }
 
-    $outdated = $installs | Where-Object { [version]$_.Version -lt [version]$latest }
-
-    if ($outdated.Count -eq 0) {
-        Write-Output "COMPLIANT: All found Python installs ($($installs.Count)) are already at the latest version."
-        exit 0
-    }
-
-    $details = $outdated | ForEach-Object { "$($_.Version) [$($_.Scope)] at $($_.Path)" }
-    Write-Output "NONCOMPLIANT: Outdated Python install(s) found: $($details -join '; ')"
+    $details = $outdatedCore | ForEach-Object { "$($_.Version) [$($_.Scope)] at $($_.InstallLocation)" }
+    Write-Output "NONCOMPLIANT: Outdated Python install(s): $($details -join '; '). Launcher: $launcherStatus"
     exit 1
 }
 catch {
