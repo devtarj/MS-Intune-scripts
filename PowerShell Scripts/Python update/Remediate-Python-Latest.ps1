@@ -4,6 +4,7 @@
 # machine-wide. Also attempts a winget-based update for Python Launcher
 # (MSIX component) as a separate, best-effort step.
 # Intune Proactive Remediation - SYSTEM context
+# Date: 2026-09-03
 # ============================================================
 
 $logDir = "C:\ProgramData\IntuneLogs"
