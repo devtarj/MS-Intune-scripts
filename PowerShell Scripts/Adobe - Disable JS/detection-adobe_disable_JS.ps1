@@ -1,4 +1,5 @@
 # Detection script for JavaScript in Adobe Reader
+# last updated: 2026-09-11
 
 try {
     $registryPath = "HKLM:\SOFTWARE\Policies\Adobe\Adobe Acrobat\DC\FeatureLockDown"
