@@ -2,6 +2,7 @@
 # Detection: Python Install Manager (pymanager/py.exe) version check
 # Intune Proactive Remediation - USER CONTEXT
 # (PyManager is a per-user tool; must run as the logged-on user)
+# Last updated: 2026-09-14
 # ============================================================
 
 try {
